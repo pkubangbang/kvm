@@ -1,0 +1,20 @@
+# Build outputs (binaries are built from source, not committed)
+/kvm
+/kvm-crosshair
+/kvm-inputpad
+/ktype-bin
+*.exe
+
+# Runtime / debug artifacts
+*.log
+*.ring
+/tmp/
+__pycache__/
+*.pyc
+
+# Go
+/vendor/
+
+# Editors / OS
+.DS_Store
+*.swp

@@ -1,0 +1,7 @@
+{
+    "uuid": "kvm-cursor-report@mycc",
+    "name": "KVM Cursor Report",
+    "description": "Publishes the live pointer position on the session bus (org.mycc.KvmCursor / Position(x,y)) and mirrors it to /tmp/kvm-cursor.pos. Read-only: draws nothing and never moves the pointer.",
+    "shell-version": ["45", "46", "47", "48", "49"],
+    "version": 1
+}

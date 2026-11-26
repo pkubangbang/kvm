@@ -108,6 +108,9 @@ func main() {
 		}
 		runMouse(args, *originFlag, *portFlag, *baudFlag)
 		return
+	case "key":
+		runKey(args, *portFlag, *baudFlag)
+		return
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -127,6 +130,12 @@ func usage() {
   kvm mouse rel rdown | rup       press/release the RIGHT button, same span rules
   kvm mouse pos                   where is the pointer
   kvm mouse hud on | off          the crosshair overlay
+
+Keyboard (HID boot keyboard on the same link):
+  kvm key type TEXT...            type the text (US layout; non-ASCII skipped)
+  kvm key tap SPEC [SPEC...]      tap each key: ctrl+w, enter, esc, f5, shift+tab
+  kvm key down SPEC               hold a key
+  kvm key up                      release every key and modifier
 
   The verb set is closed: move, down, up, rdown, rup, drag, wait (plus pos and hud).
   A command line must end with its release (up, or rup for a right span).

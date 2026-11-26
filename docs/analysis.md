@@ -1,7 +1,10 @@
 # Hand-writing analysis of the teacher glyph vs the machine attempt
 
-Sources: `reference/pad-trace-raw.json` (teacher, epoch 8, 75 + 126 points),
+Sources: `pad-trace-raw.json` (teacher, epoch 8, 75 + 126 points),
 `/tmp/drawn.json` (machine, epoch 21, 141 + 144 points).
+Both files are gone (the teacher trace was removed with `reference/`, and the metrics
+script `pad_fit_teacher.py` with it); the numbers below stay as the measured record and
+cannot be re-derived from this checkout.
 All cells are 6 px; times are ms from each stroke's first point unless stated.
 Metrics reproduced: `pad_corr.py` mean 52.1 px, p90 85.6 px, 4.5 % within one cell;
 `pad_coverage.py` 172 cells, bbox 34x67; `pad_fit_teacher.py` stem
@@ -94,7 +97,7 @@ histogram of:
 |---|---|---|---|---|---|---|---|---|---|
 | reports | 12 | 13 | 20 | 49 | 17 | 18 | 7 | 4 |
 
-**53 of 140 (38 %) are < 4 px.** `PITFALLS.md` #3 measured the host's gain on exactly
+**53 of 140 (38 %) are < 4 px.** `pitfalls.md` #3 measured the host's gain on exactly
 this: 20 px @ 12 ms -> **0.90**, 4 px -> **0.67**, and a 68 px decay train arrived as
 40 px. 577.7 commanded x 0.71 = 410 px — the recorded 408.5 px. The shortfall is
 therefore not a shape error but a **delivery** error, and it is worst where the
@@ -127,7 +130,7 @@ cells before y 92.3.
 Commanded stem start is (38.7, 26.5); recorded start is **(40.4, 23.9)** — 2.6 cells
 high and 1.7 right. The bowl is worse: recorded press at (41.4, 58.2) vs the
 teacher-copied start (39.5, 63.5), **5.6 cells off**. `abs move` is seeded from its own
-target and the 4-pass `rel` correction tolerates only +/-2 px (`PITFALLS.md` #4, #5),
+target and the 4-pass `rel` correction tolerates only +/-2 px (`pitfalls.md` #4, #5),
 so a >1 cell error can survive. This alone costs the first 10 % of `pad_corr` its error
 budget and is why the correlation is bad at every fraction, not just at the end.
 

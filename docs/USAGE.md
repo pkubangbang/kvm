@@ -1,4 +1,4 @@
-# USAGE.md — the common commands, and the conventions behind them
+# usage.md — the common commands, and the conventions behind them
 
 Read this before driving the mouse. It is written for an agent: every rule here
 exists because breaking it produced a wrong measurement or a stray mark on the

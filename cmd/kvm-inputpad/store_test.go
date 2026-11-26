@@ -56,7 +56,7 @@ func post(t *testing.T, s *traceStore, client string, evs ...padEvent) (appended
 }
 
 // records reads a client's log straight off disk — never through an API, because
-// there is no read API (PAD-PROTOCOL.md §2).
+// there is no read API (pad-protocol.md §2).
 func records(t *testing.T, s *traceStore, client string) []padRecord {
 	t.Helper()
 	recs, err := readLog(s.path(client))

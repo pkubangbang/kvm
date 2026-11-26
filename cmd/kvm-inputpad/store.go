@@ -2,7 +2,7 @@ package main
 
 // The pad's evidence store — append-only, per client, no read API.
 //
-// CONTRACT (PAD-PROTOCOL.md):
+// CONTRACT (pad-protocol.md):
 //   - one append-only log per client: <dir>/<client>.jsonl
 //   - one JSON record per line; lines are appended, never rewritten
 //   - de-duplication key is (client, ts)
@@ -29,7 +29,7 @@ const maxBodyBytes = 8 << 20
 
 // Protocol is the client<->server contract version. It is tied to the software
 // release: it stays 1 unless the SERVER CODE changes, and then it is bumped.
-// Every post carries it; a mismatch makes the client refresh (PAD-PROTOCOL.md §2).
+// Every post carries it; a mismatch makes the client refresh (pad-protocol.md §2).
 //
 // BUMPED 1 -> 2 with the ink-lingering rework. store.go changed: the epoch map
 // is now keyed by the FILE (sanitise(client)) instead of the raw client id, so a

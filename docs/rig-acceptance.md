@@ -12,7 +12,10 @@ at **00:00:05** the newest of the seven was `scripts/padturns.py` 23:27:57, then
 
 ---
 
-## 1. Reference targets (teacher, `reference/pad-trace-raw.json`, 2 strokes, 201 points, epoch 8)
+## 1. Reference targets (teacher trace `pad-trace-raw.json`, 2 strokes, 201 points, epoch 8)
+
+*Struck through below: the teacher fixture and the scripts that produced these tables were
+removed with `reference/`; the numbers stay as the measured record.*
 
 * Stem path **403.1 px** (67.2 cells) over **1504 ms** (ts 2707212 → 2708716).
 * Bowl path **577.0 px** (96.2 cells) over **2507 ms** (ts 2709916 → 2712423).
@@ -24,8 +27,9 @@ at **00:00:05** the newest of the seven was `scripts/padturns.py` 23:27:57, then
 * Density 75 and 126 samples, median dt **17 ms** = one sample per 60 Hz frame.
 * Final teacher points (the "past the target" limits): stem y **90.7** at x 41.2; bowl
   **(41.8, 92.3)**, rightmost x **70.7**.
-* Reproduce: `python3 scripts/pad_coverage.py reference/pad-trace-raw.json` →
-  `TOTAL: 172 cells ... bbox (37,26) 34x67`, `ink 403 px` / `ink 577 px`.
+* Reproduce: **no longer possible** — `scripts/pad_coverage.py` now needs an explicit trace
+  path and the teacher file is gone. It read `TOTAL: 172 cells ... bbox (37,26) 34x67`,
+  `ink 403 px` / `ink 577 px`.
 
 ---
 
@@ -58,26 +62,27 @@ GET the server's removed record route (`store.go:182-189` → HTTP 405 + JSON bo
 ## 3. No-display re-certification procedure
 
 ### 3.1 Artifacts (no display, no browser, no server read-back)
-* Teacher fixture: `reference/pad-trace-raw.json`.
-* Drawn: the newest `<client-uuid>.json` in the server's `-out` **directory**. Running server
+* Teacher fixture: **removed** with `reference/` (the drawn-side checks below still work).
+* Drawn: the newest `<client>.jsonl` in the server's `-out` **directory**. Running server
   for this session: `./kvm-inputpad -addr 127.0.0.1:8898 -box 1067,158,768,768 -out /tmp/padtrace`
-  (`ps -eo pid,etimes,args`), so the file is `/tmp/padtrace/<uuid>.json`, written per pen lift
-  by `store.go:122-152`. Locate it without a display: `ls -t /tmp/padtrace/*.json | head -1`,
-  and confirm the run with `tail -3 /tmp/padtrace/events.jsonl` (`strokes`/`clear` lines carry
-  `client`, `epoch`, `points`, `total_strokes`).
+  (`ps -eo pid,etimes,args`), so the file is `/tmp/padtrace/<client>.jsonl`, one record per
+  line (`load`/`down`/`drag`/`up`/`clear`) appended by `store.go`. Locate it without a
+  display: `ls -t /tmp/padtrace/*.jsonl | head -1`, and confirm the run with
+  `tail -3 /tmp/padtrace/events.jsonl` (`stroke`/`clear` lines carry `client`, `epoch`,
+  `points`, `total_strokes`).
 
 ### 3.2 Exact command lines (run for this verdict; all exit 0)
+The paired commands below needed `reference/pad-trace-raw.json` and no longer run; only the
+single-trace forms are still available.
 ```
-cd <repo root>   # repository checkout containing cmd/, scripts/, reference/
-DRAWN=$(ls -t /tmp/padtrace/*.json | head -1)
+cd <repo root>   # repository checkout containing cmd/, scripts/
+DRAWN=$(ls -t /tmp/padtrace/*.jsonl | head -1)
 
 python3 scripts/pad_tracecheck.py "$DRAWN"                 # stroke count, per-stroke n/bbox/ts
-python3 scripts/pad_tracecheck.py "$DRAWN" reference/pad-trace-raw.json   # paired path error
-python3 scripts/pad_coverage.py reference/pad-trace-raw.json              # teacher cells/ink
-python3 scripts/pad_coverage.py "$DRAWN"                                  # drawn cells/ink/bbox
-python3 scripts/pad_corr.py reference/pad-trace-raw.json "$DRAWN"         # mean/p90/within-cell
+python3 scripts/pad_coverage.py "$DRAWN"                    # drawn cells/ink/bbox
 ```
-Never omit `argv[1]` on `pad_corr.py`/`pad_coverage.py`: that path curls the 405 endpoint.
+Never omit `argv[1]` on `pad_corr.py`/`pad_coverage.py`: that path curls a removed endpoint
+and gets a 405.
 
 ### 3.3 Thresholds — all must hold; one failure = FAIL
 | # | gate | threshold |

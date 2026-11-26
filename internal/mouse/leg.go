@@ -11,7 +11,7 @@ import (
 // exactly the requested displacement, and they go out back to back at r.Gap.
 // There is no gain model and no learned scale: an earlier version divided the
 // distance by a measured gain and folded each pass's result back in (see
-// PITFALLS.md §5 and the git history of internal/mouse/gain.go). It made the
+// pitfalls.md §5 and the git history of internal/mouse/gain.go). It made the
 // pointer land unevenly — the visible symptom was ink that slowed and jumped —
 // and it could never be certified, so it was removed on the user's instruction.
 //

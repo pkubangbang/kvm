@@ -34,10 +34,9 @@ fidelity, and driving a browser (PaintZ) end to end.
 | `internal/cli`, `internal/config` | Argument grammar and configuration |
 | `internal/capture`, `internal/crosshair` | Screen capture and crosshair rendering |
 | `scripts/` | Python rigs used to draw, trace and certify glyphs |
-| `reference/pad-trace-raw.json` | The author's own handwriting trace, used as ground truth |
 | `third_party/ch9329` | Vendored copy of the [ch9329](https://github.com/pkubangbang/ch9329ctl) driver (separate module, wired by `replace`) |
-| `PITFALLS.md` | 19 sections, 80+ numbered pitfalls measured on this rig — read before changing motion code |
-| `Zibra-Z.md` | Recorded procedure for drawing a Z with certifiable evidence |
+| `pitfalls.md` | 19 sections, 80+ numbered pitfalls measured on this rig — read before changing motion code |
+| `zibra-z.md` | Recorded procedure for drawing a Z with certifiable evidence |
 | `analysis.md` | The motion analysis that produced the design |
 
 ---
@@ -65,7 +64,7 @@ go build -ldflags "-H windowsgui" -o kvm-crosshair.exe ./cmd/kvm-crosshair
 exits 0 and says nothing about that package — a false green, not a pass (measured:
 it exits 0 with no output while `go build ./cmd/x` fails with `build constraints
 exclude all Go files`). Narrow builds (`go build ./cmd/kvm-crosshair`) are the
-honest gate for a platform-specific package; that is `DECISION-TREE.md` A3.
+honest gate for a platform-specific package; that is `decision-tree.md` A3.
 
 `third_party/ch9329` is a **nested module** (it has its own `go.mod`); the root
 `go.mod` wires it in with a relative `replace`, so no network checkout and no
@@ -165,7 +164,7 @@ about where the pointer is.
 (`internal/crosshair/render.go`). On Windows the surface is a 32-bit BGRA DIB and
 the transparency mode is `UpdateLayeredWindow` with `ULW_COLORKEY`, key colour
 black — which also means a black overlay pixel would be invisible. See
-`PITFALLS.md` §15.
+`pitfalls.md` §15.
 
 ---
 
@@ -256,7 +255,7 @@ screen pixel pair that **must be measured, never inferred**:
 3. read that point's `rx`,`ry` from the pad's own record — ink-space, exact. The page
    POSTs each finished stroke to `/api/log`; `store.go` appends it to the newest
    `strokes.d/<client>.jsonl`, so the record is a file, not an endpoint. (The old
-   read-back endpoint is gone for good — see `PAD-PROTOCOL.md` §5.)
+   read-back endpoint is gone for good — see `pad-protocol.md` §5.)
 4. `anchor = (X, Y) - (rx x extent.w, ry x extent.h)`.
 
 Take the anchor from **two well-separated clicks** and test it on a **third**;
@@ -289,8 +288,7 @@ Two further traps already measured on this rig:
 
 The Python scripts in `scripts/` consume that format: `pad_tracecheck.py`
 (per-stroke geometry), `pad_corr.py` (paired path error), `pad_coverage.py`
-(ink coverage), `glyph_run.py` (draw a glyph and park convergently),
-`heart_check.py` (turning-point/shape detector over a trace: vertices,
+(ink coverage), `heart_check.py` (turning-point/shape detector over a trace: vertices,
 curvature sign flips, tip, cleft, lobes, closure, aspect — the only shape
 verdict this project accepts), `heart_draw.py` (emit one CLOSED heart stroke
 whose legs are asserted to sum to zero, priced against the measured per-report
@@ -317,9 +315,9 @@ cost so the stroke fits a wall-clock budget).
   (`internal/capture/capture_x11_linux.go`), and `mouse hud` fails loudly on any
   other platform (`cmd/kvm/hud_other.go`).
 * Absolute placement on multi-monitor setups is expressed in the chip's address
-  space; see `PITFALLS.md` §6.
+  space; see `pitfalls.md` §6.
 * This is experimental code written to answer specific measurement questions, not
-  a polished input daemon. `PITFALLS.md` is the honest map of what will bite you.
+  a polished input daemon. `pitfalls.md` is the honest map of what will bite you.
 
 ## License
 

@@ -105,7 +105,7 @@ a stray horizontal line produced exactly this way).
 - If a run measured the wrong build, the wrong window, or a stale client file, mark it
   **void** and say which of those it was.
 - `go build ./...` exiting 0 while a package is excluded by build tags is a false green;
-  narrow builds are the honest gate (`DECISION-TREE.md` A3).
+  narrow builds are the honest gate (`decision-tree.md` A3).
 - The store preserves stroke grouping (`append(have, s)`); a hand-POSTed multi-point stroke
   round-trips intact. If strokes arrive split, the split is upstream, not in `store.go` —
   check before blaming it.
@@ -148,7 +148,7 @@ opening a second pad (§1).
   there is no ring.
 - Delivered travel depends on **report size**, not on a constant gain: 60 px reports ≈ 1:1,
   12 px ≈ 1:1, 6 px ≈ 0.66, 3 px ≈ 0.01. Never "fix" a shortfall by doubling the request —
-  that lands back in the lossy band. See `internal/mouse/leg.go` and `PITFALLS.md` §6.
+  that lands back in the lossy band. See `internal/mouse/leg.go` and `pitfalls.md` §6.
 - `heldStepPx = 20` subdivides held drags, so a `drag 45` becomes ~3×15 px reports.
 - The stroke record lives **only on disk**: `<out>/<client>.jsonl` holds one record per
   line with kinds `load`, `down`, `drag`, `up`, `clear`; `events.jsonl` holds the per-action

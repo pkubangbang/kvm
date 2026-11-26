@@ -184,7 +184,7 @@ entry names the wrong belief, the evidence that killed it, and what replaces it.
 
 ### 9.2 Wrong beliefs about the harness / scripts
 
-10. **`glyph_run.py` planned 48 six-pixel reports per leg**, which is the densest
+10. **A glyph runner planned 48 six-pixel reports per leg** (that script is now gone), which is the densest
     stream the host accelerates most. The Z drew 25 cells wide as 60 cells.
 11. **`-dry-run` reported `~75 reports`** for a 300 px move (dividing by
     `step_px=4`) while the emitter sends 3 (dividing by `reportMaxPx=127`).
@@ -286,8 +286,8 @@ no longer exist.
 - #6 the pad's read-back route was removed — its references are now purged from scripts/docs.
 - #7 `fx`/`fy` `omitempty` misplacing samples by half a cell.
 - #8 `padturns.py` deletes turns >90°, so it cannot judge corners.
-- #9 `padhand.py` does not enforce the 5 s/letter rule.
-- #10 `pad_glyph.py` passes absolute screen x as the first drag and reuses the X
+- #9 the one-span hand drawer did not enforce the 5 s/letter rule.
+- #10 the absolute-park drawer passed absolute screen x as the first drag and reused the X
   scale for Y.
 - #11 / #12 four coexisting control laws and 8 dead motion functions — the
   `-human` emitter added this session makes the coexistence ONE MORE, so this is
@@ -302,7 +302,7 @@ below is a mistake I actually made in this session.
 
 ### 11.1 Verification mistakes
 
-30. **Judged a run by its stdout instead of its trace.** `glyph_run.py` exited 0
+30. **Judged a run by its stdout instead of its trace.** The glyph runner exited 0
     and printed "drawn" while the trace held strokes from the run before. A
     script that exits 0 has told you nothing about the paper.
 31. **Compared cells to pixels.** Planned `start (1281,340)` in screen pixels,
@@ -663,7 +663,7 @@ One held span `kvm mouse rel down drag 371 0 drag -371 371 drag 371 0 up` after
 | 3 (right) | 371 px | 286 px | 0.77 |
 
 Uniform on every leg and **both axes**, so it is not a per-axis extent error and not
-an anchor error — those produce different signatures (`PITFALLS.md` §19, `README.md`
+an anchor error — those produce different signatures (`pitfalls.md` §19, `README.md`
 *Coordinates*).
 
 **Root cause, measured from the per-event log (not hypothesised):**

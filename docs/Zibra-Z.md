@@ -1,4 +1,4 @@
-# Zibra-Z.md — draw the Z on the pad, fast, with certifiable evidence
+# zibra-z.md — draw the Z on the pad, fast, with certifiable evidence
 
 > **THE TARGET RECTANGLE BELOW IS STALE — RE-BASE IT BEFORE RUNNING.**
 > The vertices and grid in this section were measured on a rig whose pad sat at
@@ -531,7 +531,7 @@ and wrong.
 
 #### Follow-up probe, 2026-11-26 12:0x — re-check, hardware still absent (unchanged verdict)
 
-`Zibra-Z.md` was re-read and the whole Step 0–1 gate re-run at 12:0x, in case the
+`zibra-z.md` was re-read and the whole Step 0–1 gate re-run at 12:0x, in case the
 bridge had been attached since the 11:08 run. It had not. Evidence, measured this
 pass, not carried over:
 
@@ -548,7 +548,7 @@ pass, not carried over:
 Two corrections to earlier notes in this file:
 
 - **There is no read-back route.** Steps 1 and 4 of this document once told the
-  operator to curl one; that route was deleted on purpose (`PAD-PROTOCOL.md` §5 —
+  operator to curl one; that route was deleted on purpose (`pad-protocol.md` §5 —
   the API receives the log, the observer reads the file). The authorities are the
   client's own file under `-out` (`<client-id>.jsonl`, newest by mtime) and
   `events.jsonl`. Both steps above now read the file.

@@ -268,12 +268,59 @@ function grid(){
   lastS = S;
   // marker() lays down the white canvas itself, so a second full-canvas fill
   // here would only add a fillRect to the count for no pixels. One fill, then
-  // the eyes.
+  // the rules, then the eyes.
   //
-  // NO GRID LINES. The pad's grid was a drawing aid for a blank canvas; the
-  // eyes are the aid now, and a rule every 8 cells would cut through the
-  // finder rings a decoder measures.
+  // GRID LINES ARE BACK (regression restore). The "NO GRID LINES" version
+  // below was wrong twice over: the user's pad had grid lines and wants them
+  // (a drawing aid on a blank canvas), and the stated reason — "a rule every 8
+  // cells would cut through the finder rings a decoder measures" — is already
+  // handled by marker()'s separator repaint, which paints the 9x9 light
+  // separator AFTER these rules and keeps the finder rings clean for pad-bbox.
+  // So: marker() first (white canvas + finder rings + separators), then light
+  // rules on the 128-cell lattice every 8 cells (16 per axis) with the eyes'
+  // 9x9 separator regions SKIPPED, so no rule can cut through a finder ring.
   marker(S);
+  ruleGrid(S);
+}
+// ruleGrid paints one light rule every RULE_EVERY cells (16 rules per axis on
+// the 128-cell pad). The rules are LIGHT (#e2e2e2) so ink (#111) always wins
+// over them and a stroke is never confused with a rule. Each rule's run is
+// clipped around the eyes' separator rectangles (window.PAD_EYES), because a
+// rule through a finder ring is exactly what breaks pad-bbox's decode — the
+// same reason the old code deleted the grid entirely.
+const RULE_EVERY = 8;
+function ruleGrid(S){
+  const cell = S/N;
+  const e = window.PAD_EYES;
+  const skip = [];
+  if(e && e.origins && e.origins.length === 3){
+    const sep = e.sep, mod = e.module;
+    for(const o of e.origins){
+      // Skip ring: the finder's separator PLUS one extra cell of margin. The
+      // extra cell matters — a rule clipped exactly at the separator edge
+      // still leaves a rule-adjacent luma transition that pad-bbox's finder
+      // decode rejects (measured: 0/3 marks with a tight skip, 3/3 with this
+      // margin). The finder's own 7x7 module ring plus the 1-cell light
+      // separator is 9x9; this skip is 11x11, so no rule touches the mark.
+      skip.push([o[0]-sep-1+EYE_DX, o[1]-sep-1+EYE_DY, mod+2*sep+2, mod+2*sep+2]);
+    }
+  }
+  function covered(x0, y0, x1, y1){
+    for(const s of skip){
+      const sx0 = s[0]*cell, sy0 = s[1]*cell, sx1 = (s[0]+s[2])*cell, sy1 = (s[1]+s[3])*cell;
+      if(x1 > sx0 && x0 < sx1 && y1 > sy0 && y0 < sy1) return true;
+    }
+    return false;
+  }
+  g.fillStyle = '#e2e2e2';
+  for(let i=RULE_EVERY; i<N; i+=RULE_EVERY){
+    const p = Math.round(i*cell);
+    for(let a=0; a<S; a+=Math.max(1, Math.round(cell))){
+      const b = Math.min(S, a+Math.max(1, Math.round(cell)));
+      if(!covered(a, p, b, p+1)) g.fillRect(a, p, b-a, 1);
+      if(!covered(p, a, p+1, b)) g.fillRect(p, a, 1, b-a);
+    }
+  }
 }
 // pos() is the ONE place a pointer event becomes a coordinate. It records PURE
 // CSS-BOX RATIOS (rx, ry in [0,1]); px() is their exact inverse. Deriving the

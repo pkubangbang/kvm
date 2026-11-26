@@ -167,6 +167,18 @@ func main() {
 		MaxHeaderBytes:    64 << 10,
 	}
 	log.Printf("kvm-inputpad on http://%s (grid %dx%d cells, trace %s)", *addr, cells, cells, *out)
+	// TRACE-READING GUIDANCE. The trace is the ONLY evidence of what was drawn
+	// (there is no read-back API), so an agent that guesses its format wastes
+	// whole sessions — measured here: misreading the record shape produced
+	// wrong glyph diagnoses. Print the rules at startup where the operator
+	// (human or agent) sees them before touching the log.
+	log.Printf("pad-trace: read %s/<client>.jsonl (newest by mtime) + %s/events.jsonl",
+		*out, *out)
+	log.Printf("pad-trace: one JSON record per line; kinds are STRICTLY load, down, drag, up, clear")
+	log.Printf("pad-trace: fields client, ts (ms), kind, epoch (server-assigned), rx, ry (canvas ratios 0..1), cleared_strokes, cleared_points (clear only)")
+	log.Printf("pad-trace: the current picture is everything AFTER the LAST boundary record (load or clear); everything before is retired")
+	log.Printf("pad-trace: group records into strokes by down .. drag* .. up; de-dup key is (client, ts); lines are append-only, never rewritten")
+	log.Printf("pad-trace: events.jsonl is the per-action ledger (stroke, clear, client-new) — read it for ordering, the .jsonl for geometry")
 	log.Fatal(srv.ListenAndServe())
 }
 

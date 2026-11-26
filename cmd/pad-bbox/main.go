@@ -153,7 +153,15 @@ func main() {
 		t0 := time.Now()
 		g, err = grabGray()
 		t1 := time.Now()
-		fmt.Fprintf(os.Stderr, "pad-bbox: capture %dx%d in %v\n", g.w, g.h, t1.Sub(t0))
+		// Report dimensions only on a successful capture. The old order printed
+		// g.w/g.h BEFORE checking err, so on a platform where grabGray fails
+		// (it is Windows-only; elsewhere it returns an error) the nil *gray
+		// dereferenced here and the tool segfaulted instead of reporting the
+		// honest "use -shot" error — measured on Linux/Wayland as
+		// SIGSEGV at main.go:156.
+		if err == nil {
+			fmt.Fprintf(os.Stderr, "pad-bbox: capture %dx%d in %v\n", g.w, g.h, t1.Sub(t0))
+		}
 	} else {
 		g, err = loadGray(*shot)
 	}

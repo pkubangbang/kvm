@@ -15,7 +15,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/pkubangbang/kvm/internal/config"
 	"github.com/pkubangbang/kvm/internal/mouse"
@@ -28,6 +30,7 @@ func main() {
 		humanFlag  = flag.Bool("human", true, "human motion profile (accelerate, dwell at corners, tremor)")
 		originFlag = flag.Bool("origin", false, "home to the top-left corner first (a known start)")
 		buttonFlag = flag.String("button", "left", "button held by down/drag/holdseg: left, right or middle")
+		dryRunFlag = flag.Bool("dry-run", false, "validate and print the plan (bbox, 85%-hottest bbox, safe-zone verdict); send nothing")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -51,6 +54,9 @@ func main() {
 				consumed = true
 			case a == "-origin" || a == "--origin":
 				*originFlag = true
+				consumed = true
+			case a == "-dry-run" || a == "--dry-run":
+				*dryRunFlag = true
 				consumed = true
 			case (a == "-button" || a == "--button") && i+1 < len(args):
 				*buttonFlag = args[i+1]
@@ -83,10 +89,42 @@ func main() {
 	humanOn = *humanFlag
 	buttonOn = *buttonFlag
 
+	// SIGINT/SIGTERM must neutralize the wire, not just die. A Ctrl-C in the
+	// middle of a long held span used to kill the process with the button
+	// latched on the chip (deferred releases never run on a signal), so the
+	// rig treated the user's next real click as a drag. The handler calls the
+	// same neutralize funnel as every error path; Rel.Neutralize is a
+	// sync.Once, so a signal racing normal completion cannot emit the release
+	// twice or interleave it with in-flight stroke reports.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		fmt.Fprintln(os.Stderr, "kvm: interrupted; neutralizing (all buttons up)")
+		neutralize(nil)
+		os.Exit(130)
+	}()
+
 	switch args[0] {
 	case "mouse":
 		// The grammar IS the command: kvm mouse abs|rel <verbs>...
 		// -dry-run predicts, otherwise it sends. No wrapper verbs.
+	dryRun := *dryRunFlag
+	if dryRun {
+		// Predict mode: report the plan (bbox, 85%-hottest bbox, safe-zone
+		// verdict) and send nothing. The caller finds out here — not from a
+		// physically wandering mouse — whether the motion stays in the safe
+		// zone. See dryrun.go.
+		//
+		// args is still `mouse abs ...` / `mouse rel ...` here, so the verb
+		// payload starts at index 1 — but runFire expects each segment to
+		// carry its namespace (argv[0] is `mouse`, segs[0][1] is `abs|rel`),
+		// which splitOn(args[1:]) would drop. Feed it the same argv shape
+		// runFire gets.
+		cfg := settings(*portFlag, *baudFlag)
+		reportDryRun(splitOn(args), *originFlag, cfg.ScreenW, cfg.ScreenH)
+		return
+	}
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: kvm mouse abs|rel <verbs>... | kvm mouse pos")
 			os.Exit(1)

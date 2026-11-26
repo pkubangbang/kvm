@@ -2,6 +2,7 @@ package mouse
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"ch9329"
@@ -32,6 +33,10 @@ type Rel struct {
 	// sequence, because the rule being tested is arithmetic over consecutive
 	// samples and must not depend on a live cursor.
 	witness func() ([2]int, bool)
+	// neutralizeOnce makes Neutralize emit its release/zero-delta sequence at
+	// most once, so a signal handler racing the normal completion path cannot
+	// interleave a second release with in-flight stroke reports.
+	neutralizeOnce sync.Once
 }
 
 // NewRel builds the relative controller.
@@ -361,6 +366,39 @@ func (r *Rel) upRaw() error {
 // is the error-path guarantee, for the case where the failure IS that the state
 // cannot be trusted (a span that died halfway through its reports).
 func (r *Rel) ForceRelease() { _ = r.release() }
+
+// Neutralize drives the wire to a neutral state: every button up, no motion in
+// flight. It is the end-of-life funnel — normal completion, any error exit, and
+// the SIGINT/SIGTERM handler all end here — so "the last frames on the wire are
+// a release and a zero-delta" is a property of the emitter, not of call sites
+// remembering to clean up.
+//
+// The order matters:
+//  1. release() writes the all-zero release frame (btn=0, dx=0, dy=0) and only
+//     then clears r.down — the wire/flag ordering sim-b CRITICAL-2 requires.
+//  2. One explicit zero-delta frame follows, so the FINAL frame on the wire is
+//     provably still ("stay still", not merely "not moving at this instant").
+//     streamAt would swallow it (its all-zero early return), so it is written
+//     here directly like release() does.
+//  3. A drain discards anything left unread so the chip is not left with a
+//     pending ACK.
+//
+// It is idempotent and safe to call from a signal handler racing the normal
+// path: the once guard means the wire sees the sequence at most once.
+func (r *Rel) Neutralize() {
+	r.neutralizeOnce.Do(func() {
+		_ = r.release()
+		frame := ch9329.MouseRelFrame(0, 0, 0, 0)
+		if device := r.device(); device != nil {
+			device.Frames++
+			if device.Verbose && device.Trace != nil {
+				device.Trace(fmt.Sprintf("-> %s (neutralize)", ch9329.Hex(frame)))
+			}
+		}
+		_, _ = r.port().Write(frame)
+		r.drain()
+	})
+}
 
 // Held reports whether this controller believes the button is now held.
 func (r *Rel) Held() bool { return r.down }

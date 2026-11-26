@@ -346,16 +346,21 @@ func (g *gray) padRect() (x0, y0, x1, y1 int, ok bool) {
 // the same luma range as a black module.
 func (g *gray) seedMask() []bool {
 	m := make([]bool, len(g.px))
-	_, hi := g.seedBand()
-	x0, y0, x1, y1, ok := g.padRect()
-	if !ok {
-		return m
-	}
-	for y := y0; y < y1; y++ {
-		row := g.px[y*g.w:]
-		for x := x0; x < x1; x++ {
-			m[y*g.w+x] = row[x] <= hi
-		}
+	lo, hi := g.seedBand()
+	// SEED ON THE LUMA BAND ALONE, NOT INSIDE padRect. The old form returned
+	// an all-false mask when padRect() was !ok (its `return m` on !ok) and when
+	// the rect was mis-measured, so the finder decode saw ZERO seed pixels and
+	// 0/3 marks on every frame (measured: seed_pixels 0 on a fresh capture).
+	// The user's rule is "allow the noise and increase the capability of
+	// detection": the seed is a CANDIDATE band over the whole frame, and the
+	// FFT matched filter (findInBlobFFT) is what rejects grid rules and ink by
+	// their spectrum. pageDark is excluded so the page background (which is
+	// BELOW padLight-seedGap and would otherwise seed) does not merge every
+	// mark into one blob.
+	page := g.pageDark()
+	for i := range m {
+		v := g.px[i]
+		m[i] = v >= lo && v <= hi && v > page+1
 	}
 	return m
 }
@@ -474,8 +479,19 @@ func window(x, y, span, w, h int) (int, int, int, int) {
 // runsAt walks from (x,y) along (dx,dy) collecting run lengths of the mask,
 // starting with the value at (x,y). The caller controls which colour starts the
 // 1:1:3:1:1 window, which is why this does not "normalise" to dark-first.
+//
+// NOISE TOLERANCE (the fix this got wrong once): the pad paints light grid
+// rules every 8 cells, and a rule crossing a finder SPLITS a light run into
+// two (or merges a dark edge), so the raw walk returns 6..7 runs where the
+// pattern has 5 and finderRuns rejects a finder the same program painted. The
+// page must NOT avoid this (no skip-rings — the user's rule: allow the noise
+// and make the detector stronger). So: runs are MERGED here when the split is
+// a noise artefact — a run too short to be a module (below the local module
+// estimate) joins its neighbour of the SAME value, and a one-pixel dip inside
+// a run of the other value is bridged. The merged sequence is what the ratio
+// test sees.
 func (g *gray) runsAt(m *markMask, x, y, dx, dy, limit int) []int {
-	out := make([]int, 0, nRuns+2)
+	out := make([]int, 0, nRuns+4)
 	if x < 0 || x >= g.w || y < 0 || y >= g.h {
 		return out
 	}
@@ -501,10 +517,65 @@ func (g *gray) runsAt(m *markMask, x, y, dx, dy, limit int) []int {
 		x += dx
 		y += dy
 	}
-	if len(out) < nRuns && n > 0 {
+	if n > 0 {
 		out = append(out, n)
 	}
-	return out
+	return mergeNoiseRuns(out)
+}
+
+// mergeNoiseRuns folds runs that a grid rule (or ink speck) split, so the
+// sequence the ratio test sees has the finder's true 5 runs.
+//
+// Two artefacts, both measured on this pad:
+//   - a light rule through a light ring splits it into two short light runs
+//     with a one-pixel dark dip between: [4, 3, 1, 3, 12, 3, 1, 3, 4] must
+//     become [4, 4, 12, 4, 4];
+//   - a rule through a DARK run splits the dark run the same way.
+//
+// The bridging rule: a run of ONE value that is much shorter than both
+// neighbours' runs of the OTHER value and shorter than a module is a noise
+// dip — merge the two neighbours across it. The module estimate is the median
+// run length, robust to the 3-module core. The loop repeats until stable, so a
+// rule crossing two rings is folded in one pass per ring.
+func mergeNoiseRuns(runs []int) []int {
+	for {
+		if len(runs) < 3 {
+			return runs
+		}
+		// module estimate: the median run (the 3-module core is an outlier)
+		sorted := append([]int(nil), runs...)
+		for i := 1; i < len(sorted); i++ {
+			for j := i; j > 0 && sorted[j-1] > sorted[j]; j-- {
+				sorted[j-1], sorted[j] = sorted[j], sorted[j-1]
+			}
+		}
+		module := sorted[len(sorted)/2]
+		if module < 1 {
+			module = 1
+		}
+		changed := false
+		out := make([]int, 0, len(runs))
+		for i := 0; i < len(runs); {
+			// a noise dip: runs[i] is short and runs[i-1], runs[i+1] are the
+			// same colour (they are, because runs alternate) and much longer
+			if i > 0 && i+1 < len(runs) &&
+				runs[i] < module && runs[i] <= runs[i-1]/2 && runs[i] <= runs[i+1]/2 {
+				// fold the dip into its neighbours
+				if len(out) > 0 {
+					out[len(out)-1] += runs[i] + runs[i+1]
+				}
+				i += 2
+				changed = true
+				continue
+			}
+			out = append(out, runs[i])
+			i++
+		}
+		runs = out
+		if !changed {
+			return runs
+		}
+	}
 }
 
 // isFinderRatio is ZXing's foundPatternCross: 1:1:3:1:1, half a module of
@@ -1154,6 +1225,104 @@ func (g *gray) blobs(seed []bool) []blob {
 }
 
 // candidates finds every finder pattern in the image.
+// findInBlobFFT is the NOISE-TOLERANT finder locator: it correlates each row
+// and column of the blob against the 1:1:3:1:1 kernel via the discrete FFT
+// (see correlateFFT) and takes the spectral peak as the finder's centre line.
+//
+// WHY THIS EXISTS: findInBlob's per-scanline run-length matcher demands
+// exactly five runs in a 1:1:3:1:1 ratio; a grid rule crossing the finder
+// SPLITS a run and the match fails on a mark the same program painted
+// (measured: 0/3 marks with the pad's rules on). The FFT works in the SIGNAL
+// domain — the finder is a periodic square wave (dark ring, light ring, dark
+// core) whose fundamental sits at 1/(2*module) with a characteristic harmonic
+// signature, while grid rules and ink are broadband noise at other
+// frequencies. A rule crossing the mark is rejected by the spectrum instead of
+// breaking the run count.
+//
+// The blob's module estimate comes from the blob's own width/height (a finder
+// is 7 modules wide + 2 separator = 9 cells), then the peak position supplies
+// the centre. crossCheck (the geometric measure) still confirms it.
+func (g *gray) findInBlobFFT(b blob, seed []bool) (*finder, bool) {
+	w := b.x1 - b.x0 + 1
+	h := b.y1 - b.y0 + 1
+	if w < 5 || h < 5 {
+		return nil, false
+	}
+	// A finder's outer bound is 9 cells (7-module ring + 1-cell separator each
+	// side). The blob is the seed band's dark modules, so its extent is the
+	// ring's 7 cells; module ~= extent/7.
+	module := float64(w) / 7.0
+	if float64(h)/7.0 > module {
+		module = float64(h) / 7.0
+	}
+	if module < 1.2 {
+		module = 1.2
+	}
+	// Correlate the blob's middle row and middle column against the kernel.
+	mask := make([]bool, g.w*g.h)
+	for y := b.y0; y <= b.y1; y++ {
+		for x := b.x0; x <= b.x1; x++ {
+			mask[y*g.w+x] = seed[y*g.w+x]
+		}
+	}
+	// Horizontal scan at the blob's mid row: the peak x is the finder's centre x.
+	midY := (b.y0 + b.y1) / 2
+	sig := make([]float64, w)
+	for i := 0; i < w; i++ {
+		if mask[midY*g.w+b.x0+i] {
+			sig[i] = 1
+		} else {
+			sig[i] = -1
+		}
+	}
+	k := finderKernel1D(module)
+	corrX := correlateFFT(sig, k)
+	bestX, bestXScore := 0, math.Inf(-1)
+	for i, c := range corrX {
+		if c > bestXScore {
+			bestXScore = c
+			bestX = i
+		}
+	}
+	// Vertical scan at the blob's mid column.
+	midX := (b.x0 + b.x1) / 2
+	sigY := make([]float64, h)
+	for i := 0; i < h; i++ {
+		if mask[(b.y0+i)*g.w+midX] {
+			sigY[i] = 1
+		} else {
+			sigY[i] = -1
+		}
+	}
+	corrY := correlateFFT(sigY, k)
+	bestY, bestYScore := 0, math.Inf(-1)
+	for i, c := range corrY {
+		if c > bestYScore {
+			bestYScore = c
+			bestY = i
+		}
+	}
+	// A real finder shows the fundamental on both axes: the peak score is
+	// ~kernel length (all 7 modules aligned). A grid rule or ink edge gives a
+	// much lower score. Require a score of at least half the kernel's energy.
+	want := 0.0
+	for _, v := range k {
+		want += v * v
+	}
+	want = math.Sqrt(want) * 0.5
+	if bestXScore < want || bestYScore < want {
+		return nil, false
+	}
+	cx := float64(b.x0 + bestX)
+	cy := float64(b.y0 + bestY)
+	_, _, mid, ok := g.windowStats(b.x0, b.y0, b.x1+1, b.y1+1)
+	if !ok {
+		return nil, false
+	}
+	f := &finder{X: cx, Y: cy, Module: module, Mid: mid}
+	return f, true
+}
+
 func (g *gray) candidates(cfg probeCfg) []*finder {
 	dbgMeasure = os.Getenv("PADBBOX_DEBUG") != ""
 	seed := g.seedMask()
@@ -1170,7 +1339,19 @@ func (g *gray) candidates(cfg probeCfg) []*finder {
 		}
 		f, ok := g.findInBlob(b, scratch)
 		if !ok {
-			continue
+			// FFT FALLBACK (the noise-tolerant path). findInBlob's per-scanline
+			// run-length matcher demands exactly five runs in a 1:1:3:1:1
+			// ratio; a grid rule crossing the finder SPLITS a run and the
+			// match fails on a mark the same program painted (measured: 0/3
+			// with the pad's rules on). The FFT matched filter works in the
+			// signal domain — the finder is a periodic square wave whose
+			// fundamental sits at 1/(2*module), while grid rules and ink are
+			// broadband noise — so a rule crossing the mark is rejected by the
+			// spectrum instead of breaking the run count. See fft_detect.go.
+			f, ok = g.findInBlobFFT(b, seed)
+			if !ok {
+				continue
+			}
 		}
 		merged := false
 		for _, e := range found {

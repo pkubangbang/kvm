@@ -36,23 +36,49 @@ func splitOn(argv []string) [][]string {
 	return out
 }
 
-// fail releases the button BEFORE exiting, and is the only way out of a path
-// that may have a button held.
+// relHandle is the live controller for the duration of one device session, so
+// the end-of-life funnel (fail / signal handler) can neutralize the wire even
+// from a code path that has no *Rel in scope. It is set once per open and
+// cleared by neutralize.
+var relHandle *mouse.Rel
+
+// neutralize drives the wire to a neutral state — all buttons up, no motion in
+// flight — and closes the device. It is the ONE owner of end-of-life: normal
+// completion, every fail() error path, and the SIGINT/SIGTERM handler all end
+// here.
 //
-// os.Exit does not run deferred functions. This file defers dv.Release() and
-// dv.Close(), so every os.Exit inside the span loop bypassed the release and
-// left the chip holding the button DOWN on the wire — a physically latched
-// drag on a real HID device. The visible consequences were a desktop dragged
-// under the pointer, and every later run committing nothing because its press
-// was not a press: the button was already down from the previous failure.
+// os.Exit does not run deferred functions, so cleanup must be explicit at every
+// exit. This used to be spread across fail(), a deferred dv.Release(), scattered
+// rel.ForceRelease() calls and a belt-and-braces check at the end of runFire —
+// four places, each of which could be bypassed. The button state is then left
+// DOWN on the wire: a physically latched drag on a real HID device. The visible
+// consequences were a desktop dragged under the pointer, and every later run
+// committing nothing because its press was not a press: the button was already
+// down from the previous failure.
+//
+// Rel.Neutralize is idempotent (sync.Once), so calling it here and again from a
+// racing signal handler emits the release/zero-delta sequence exactly once.
+func neutralize(dv *mouse.Device) {
+	if rel := relHandle; rel != nil {
+		rel.Neutralize()
+		relHandle = nil
+	} else if dv != nil {
+		// No controller (e.g. the failure happened before NewRel): the device
+		// release frame is still the right neutral state.
+		dv.Release()
+	}
+	if dv != nil {
+		dv.Close()
+	}
+}
+
+// fail neutralizes the wire BEFORE exiting, and is the only way out of a path
+// that may have a button held or motion in flight.
 //
 // Release is called explicitly and its error is ignored on purpose: this is the
 // last thing the process does, and an error here cannot be reported usefully.
 func fail(dv *mouse.Device, code int, format string, args ...any) {
-	if dv != nil {
-		dv.Release()
-		dv.Close()
-	}
+	neutralize(dv)
 	fmt.Fprintf(os.Stderr, format, args...)
 	os.Exit(code)
 }
@@ -76,22 +102,22 @@ func runFire(argv []string, origin bool, portFlag string, baudFlag int) {
 	if err != nil {
 		fail(dv, 3, "kvm: %v\n", err)
 	}
-	defer dv.Close()
-	defer dv.Release()
-
+	// End-of-life is owned by neutralize (called by fail and the signal handler,
+	// and at the end of this function on the success path). The old bare
+	// defers (dv.Close / dv.Release) never ran on os.Exit and left the button
+	// latched — see neutralize's comment.
 	rel := mouse.NewRel(dv, mouse.HeldStepPx, mouse.DefaultGap,
 		time.Duration(cfg.ClickGap)*time.Millisecond)
+	relHandle = rel
 	if err := rel.SetButton(buttonMask()); err != nil {
-		fmt.Fprintf(os.Stderr, "kvm: %v\n", err)
-		os.Exit(2)
+		fail(dv, 2, "kvm: %v\n", err)
 	}
 	abs := mouse.NewAbs(dv, rel)
 
 	if origin && len(segs) == 1 && segs[0][1] == "rel" {
 		fmt.Println("homing to the top-left corner")
 		if err := rel.Home(cfg.ScreenW, cfg.ScreenH); err != nil {
-			fmt.Fprintf(os.Stderr, "kvm: home: %v\n", err)
-			os.Exit(3)
+			fail(dv, 3, "kvm: home: %v\n", err)
 		}
 	}
 
@@ -159,16 +185,12 @@ func runFire(argv []string, origin bool, portFlag string, baudFlag int) {
 					// moment Parse stopped appending its terminating `up`.
 					i = end
 					if err := rel.HumanStroke(path, mouse.DefaultHuman()); err != nil {
-						fmt.Fprintf(os.Stderr, "kvm: segment %d human path: %v\n", s, err)
-						rel.ForceRelease()
-						os.Exit(3)
+						fail(dv, 3, "kvm: segment %d human path: %v\n", s, err)
 					}
 					continue
 				}
 				if err := abs.StrokeHeldPaced(path, gaps); err != nil {
-					fmt.Fprintf(os.Stderr, "kvm: segment %d held path: %v\n", s, err)
-					rel.ForceRelease()
-					os.Exit(3)
+					fail(dv, 3, "kvm: segment %d held path: %v\n", s, err)
 				}
 				// The flat span consumed the run exactly as the human arm does,
 				// so the cursor must jump past it too. This was missing: with no
@@ -183,11 +205,7 @@ func runFire(argv []string, origin bool, portFlag string, baudFlag int) {
 			switch {
 			case !seq.Rel:
 				if err := exec(abs, rel, seq.Rel, v); err != nil {
-					fmt.Fprintf(os.Stderr, "kvm: segment %d verb %d (%s): %v\n", s, i, v.Kind, err)
-					if rel.Held() {
-						rel.ForceRelease()
-					}
-					os.Exit(3)
+					fail(dv, 3, "kvm: segment %d verb %d (%s): %v\n", s, i, v.Kind, err)
 				}
 			case v.Kind == cli.Down, v.Kind == cli.RDown:
 				// The verb decides WHICH button is pressed; -button only sets the
@@ -237,11 +255,7 @@ func runFire(argv []string, origin bool, portFlag string, baudFlag int) {
 				}
 			default:
 				if err := exec(abs, rel, seq.Rel, v); err != nil {
-					fmt.Fprintf(os.Stderr, "kvm: segment %d verb %d (%s): %v\n", s, i, v.Kind, err)
-					if rel.Held() {
-						rel.ForceRelease()
-					}
-					os.Exit(3)
+					fail(dv, 3, "kvm: segment %d verb %d (%s): %v\n", s, i, v.Kind, err)
 				}
 			}
 			i++
@@ -250,11 +264,16 @@ func runFire(argv []string, origin bool, portFlag string, baudFlag int) {
 	// Belt and braces: the grammar always terminates with `up` (cli.Parse
 	// appends one), so arriving here pressed means the grammar and this loop
 	// disagree. Never exit with the button down — a stuck HID press turns the
-	// user's next click into a drag on their real desktop.
+	// user's next click into a drag on their real desktop. neutralize() below
+	// is what actually guarantees the neutral wire; this check only reports the
+	// disagreement.
 	if rel.Held() {
-		rel.ForceRelease()
 		fmt.Fprintln(os.Stderr, "kvm: button was still held at end of sequence; released")
 	}
+	// Success path: the same end-of-life funnel as every error path — all
+	// buttons up, no motion in flight, device closed. Exactly once (Rel's
+	// sync.Once), even if the signal handler fires concurrently.
+	neutralize(dv)
 }
 
 // heldRun turns the held run starting at i into a path, a per-report gap
@@ -355,18 +374,16 @@ func runHeldSegment(argv []string, portFlag string, baudFlag int) {
 	if err != nil {
 		fail(dv, 3, "kvm: %v\n", err)
 	}
-	defer dv.Close()
-	defer dv.Release()
 	rel := mouse.NewRel(dv, mouse.HeldStepPx, mouse.DefaultGap,
 		time.Duration(cfg.ClickGap)*time.Millisecond)
+	relHandle = rel
 	if err := rel.SetButton(buttonMask()); err != nil {
-		fmt.Fprintf(os.Stderr, "kvm: %v\n", err)
-		os.Exit(2)
+		fail(dv, 2, "kvm: %v\n", err)
 	}
 	if err := rel.DrawStep([2]int{nums[0], nums[1]}, [2]int{nums[2], nums[3]}); err != nil {
-		fmt.Fprintf(os.Stderr, "kvm: holdseg: %v\n", err)
-		os.Exit(3)
+		fail(dv, 3, "kvm: holdseg: %v\n", err)
 	}
+	neutralize(dv)
 }
 
 // exec runs ONE non-held verb. It is called only for verbs the held-run merge

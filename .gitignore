@@ -23,6 +23,7 @@ __pycache__/
 # Contents-only, not `/.mycc/`, so a future negation can track a specific
 # subfolder (e.g. `!.mycc/skills/`) without committing sessions.
 /.mycc/*
+!.mycc/skills/
 
 # Runtime trace output from `kvm-inputpad -out strokes.d`
 /strokes.d/

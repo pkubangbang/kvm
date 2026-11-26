@@ -40,6 +40,13 @@ const (
 	Up   Kind = "up"
 	Drag Kind = "drag"
 	Wait Kind = "wait"
+	// Scroll turns the wheel by N notches. Positive scrolls UP (the direction
+	// the wheel byte's sign means on the wire), negative scrolls down.
+	//
+	// It is a RELATIVE verb because the wheel byte exists only on the relative
+	// report (0x05): the absolute report (0x04) has a wheel field the host
+	// ignores for scrolling on this rig, so `abs scroll` would be a fake verb.
+	Scroll Kind = "scroll"
 	// RDown and RUp are "down" and "up" with the RIGHT button. They exist as
 	// verbs, not as a flag, because a right-click is a first-class action
 	// ("open the context menu") and not a mode the whole command runs in.
@@ -99,6 +106,10 @@ var relSpecs = map[Kind]spec{
 	Up:   {arity: 0, state: stateDown},
 	Drag: {arity: 2, state: stateDown},
 	Wait: {arity: 1, state: stateAny},
+	// Scroll is legal in BOTH states: turning the wheel while a button is held
+	// is a real gesture (scrolling a canvas during a drag), and the wheel byte
+	// rides the same report as the motion, so it needs no latch of its own.
+	Scroll: {arity: 1, state: stateAny},
 	// The right button obeys the same latch: press only when up, release only
 	// when down. RDown and RUp are separate verbs rather than a button flag so
 	// one sequence can mix buttons without a mode switch.
@@ -196,6 +207,13 @@ func Parse(argv []string, cfg Config) (Sequence, error) {
 		case k == Wait:
 			if nums[0] < 0 || nums[0] > 60000 {
 				return Sequence{}, fmt.Errorf("at token %d: wait %d out of range [0,60000]", i, nums[0])
+			}
+		case k == Scroll:
+			// A notch count past this is a typo, not a gesture: each notch is
+			// its own ACK-paced report, so an unbounded value would spin the
+			// wheel for seconds. 100 notches is already several screens.
+			if nums[0] < -100 || nums[0] > 100 {
+				return Sequence{}, fmt.Errorf("at token %d: scroll %d out of range [-100,100] notches", i, nums[0])
 			}
 		case rel:
 			// NOTE: |d| <= 127 is a WIRE constraint (one HID report), not a limit on

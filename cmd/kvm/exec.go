@@ -463,6 +463,20 @@ func exec(abs *mouse.Abs, rel *mouse.Rel, relative bool, v cli.Verb) error {
 		// the first of them with the button already pressed on the wire.
 		// A wait never touches the button; it is a pure sleep.
 		return rel.Wait(v.A)
+	case cli.Scroll:
+		// The wheel byte rides the RELATIVE report (0x05), so this is a rel-only
+		// verb and absSpecs keeps it out of the abs namespace.
+		//
+		// SIGN: positive = UP, matching ch9329's wire convention
+		// (MouseRelFrame's wheel byte is positive for wheel-up). The executor
+		// does not flip it, so `scroll -3` is three notches DOWN — the reading a
+		// user expects from a scroll container, where downward travel is the
+		// common case and therefore the negative number.
+		if err := rel.Wheel(v.A); err != nil {
+			return err
+		}
+		fmt.Printf("scroll %+d notches\n", v.A)
+		return nil
 	}
 	// cli.Down and cli.Up are handled by the caller (so Rel's held state is
 	// updated by exactly the two verbs that change it), and cli.Drag is claimed

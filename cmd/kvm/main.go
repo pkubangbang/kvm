@@ -109,22 +109,22 @@ func main() {
 	case "mouse":
 		// The grammar IS the command: kvm mouse abs|rel <verbs>...
 		// -dry-run predicts, otherwise it sends. No wrapper verbs.
-	dryRun := *dryRunFlag
-	if dryRun {
-		// Predict mode: report the plan (bbox, 85%-hottest bbox, safe-zone
-		// verdict) and send nothing. The caller finds out here — not from a
-		// physically wandering mouse — whether the motion stays in the safe
-		// zone. See dryrun.go.
-		//
-		// args is still `mouse abs ...` / `mouse rel ...` here, so the verb
-		// payload starts at index 1 — but runFire expects each segment to
-		// carry its namespace (argv[0] is `mouse`, segs[0][1] is `abs|rel`),
-		// which splitOn(args[1:]) would drop. Feed it the same argv shape
-		// runFire gets.
-		cfg := settings(*portFlag, *baudFlag)
-		reportDryRun(splitOn(args), *originFlag, cfg.ScreenW, cfg.ScreenH)
-		return
-	}
+		dryRun := *dryRunFlag
+		if dryRun {
+			// Predict mode: report the plan (bbox, 85%-hottest bbox, safe-zone
+			// verdict) and send nothing. The caller finds out here — not from a
+			// physically wandering mouse — whether the motion stays in the safe
+			// zone. See dryrun.go.
+			//
+			// args is still `mouse abs ...` / `mouse rel ...` here, so the verb
+			// payload starts at index 1 — but runFire expects each segment to
+			// carry its namespace (argv[0] is `mouse`, segs[0][1] is `abs|rel`),
+			// which splitOn(args[1:]) would drop. Feed it the same argv shape
+			// runFire gets.
+			cfg := settings(*portFlag, *baudFlag)
+			reportDryRun(splitOn(args), *originFlag, cfg.ScreenW, cfg.ScreenH)
+			return
+		}
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: kvm mouse abs|rel <verbs>... | kvm mouse pos")
 			os.Exit(1)
@@ -164,7 +164,8 @@ func usage() {
   kvm mouse abs move X Y          place the pointer
   kvm -button L mouse abs holdseg X Y U V
                                   one held segment (left|right|middle)
-  kvm mouse rel move DX DY | down | up | drag DX DY | wait MS
+  kvm mouse rel move DX DY | down | up | drag DX DY | wait MS | scroll N
+  kvm mouse rel scroll N          turn the wheel N notches (+ up, - down)
   kvm mouse rel rdown | rup       press/release the RIGHT button, same span rules
   kvm mouse pos                   where is the pointer
   kvm mouse hud on | off          the crosshair overlay

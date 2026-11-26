@@ -46,6 +46,7 @@ import (
 	"image/png"
 	"math"
 	"os"
+	"time"
 )
 
 // probeCfg is what the scan needs from the command line, grouped so the scan
@@ -105,6 +106,7 @@ func loadGray(path string) (*gray, error) {
 
 func main() {
 	shot := flag.String("shot", "", "PNG screenshot of the pad")
+	grab := flag.Bool("grab", false, "capture the screen in-process (no ffmpeg, no file)")
 	asJSON := flag.Bool("json", false, "print one JSON object")
 	asBBox := flag.Bool("bbox", false, "print only `x1 y1 x2 y2` on one line (the pad rect)")
 	verbose := flag.Bool("v", false, "list every candidate")
@@ -139,13 +141,24 @@ func main() {
 		return
 	}
 
-	if *shot == "" {
-		fmt.Fprintln(os.Stderr, "pad-bbox: -shot is required (or -make-fixture OUT)")
+	if *shot == "" && !*grab {
+		fmt.Fprintln(os.Stderr, "pad-bbox: -shot is required (or -grab, or -make-fixture OUT)")
 		os.Exit(2)
 	}
-	g, err := loadGray(*shot)
+	var g *gray
+	var err error
+	source := *shot
+	if *grab {
+		source = "(grab)"
+		t0 := time.Now()
+		g, err = grabGray()
+		t1 := time.Now()
+		fmt.Fprintf(os.Stderr, "pad-bbox: capture %dx%d in %v\n", g.w, g.h, t1.Sub(t0))
+	} else {
+		g, err = loadGray(*shot)
+	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pad-bbox: cannot read %s: %v\n", *shot, err)
+		fmt.Fprintf(os.Stderr, "pad-bbox: cannot read %s: %v\n", source, err)
 		os.Exit(2)
 	}
 

@@ -27,7 +27,7 @@ fidelity, and driving a browser (PaintZ) end to end.
 | `cmd/kvm` | The CLI: `mouse abs`, `mouse rel`, `mouse pos`, `mouse hud` |
 | `cmd/kvm-crosshair` | Standalone overlay drawing a crosshair at the reported cursor position: X11 on Linux, a Win32 layered window on Windows |
 | `cmd/kvm-inputpad` | HTTP pad server (embedded page, `127.0.0.1:8899`) recording strokes into a 128×128 cell grid and exporting traces as JSON |
-| `cmd/pad-bbox` | Pad dimension detector: reads a full-size screenshot and prints the pad canvas rect (`-bbox` → `x1 y1 x2 y2`) by locating the three QR "eyes" painted in the canvas corners |
+| `cmd/pad-bbox` | Pad dimension detector: locates the three QR "eyes" painted in the canvas corners and prints the pad canvas rect (`-bbox` → `x1 y1 x2 y2`). `-grab` captures the screen in-process (Windows GDI, ~20 ms) instead of reading a PNG (`-shot`, ~2 s via `ffmpeg -f gdigrab` → file) |
 | `extensions/kvm-cursor-report@mycc` | GNOME Shell extension publishing the compositor's pointer position into a shared-memory ring |
 | `internal/mouse` | Motion core: absolute placement, relative ink, ACK-paced transport, human-motion profile |
 | `internal/cursor` | Reader for the cursor ring (`/run/user/<uid>/kvm-cursor.ring`) |

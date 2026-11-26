@@ -7,19 +7,43 @@ were repeatedly violated. Read them before touching the mouse, the pad, or a bro
 
 ## 1. The input pad is the one inside VS Code. Do not open another.
 
-The canonical input pad is the page serving `127.0.0.1:8898` **as embedded in the VS Code
-webview pane** (`cmd/kvm-inputpad`, the "Inputpad" tab). That is the pad every measurement
-refers to.
+The canonical input pad is served by `cmd/kvm-inputpad` on `127.0.0.1:8899` (the flag default;
+AGENTS.md used to say 8898 — the real listener is whatever `netstat`/`Test-NetConnection`
+shows) **as embedded in the VS Code webview pane** (the "Inputpad" tab). That is the pad every
+measurement refers to.
 
 **Do not:**
 - open the pad in Edge, Chrome, or any other browser window;
 - launch `--new-window`, `--app=`, or a second tab for the pad;
-- start extra `kvm-inputpad` instances on spare ports to "get a window I control";
-- close or restart the pad, or reload its page, without being asked.
+- start extra `kvm-inputpad` instances on spare ports to "get a window I control".
+
+**Reloading and restarting ARE allowed** (the user's standing grant: "you have the right to
+do anything on this repository"). What the old wording forbade — "without being asked" —
+was misread as a permanent ban and cost a whole session. Read it as: if the page looks
+wrong or stale, fix it, do not ask permission you already have.
+
+**THE STALE-BUILD TRAP — read this before blaming code or the pointer.** `page.html`,
+`pad-core.js` and `pad-events.js` are `//go:embed`-ed into the binary (`main.go:413+`).
+The server hands out the page it was **compiled with**, not the one on disk. Editing
+`page.html` changes nothing until `kvm-inputpad` is **rebuilt and restarted**. Measured on
+this rig: the running process had started 13:59:05 while `page.html` was modified 14:17:44,
+so the webview served an eighteen-minute-stale page all session — four corner markers when
+the source painted three. Reloading the webview (`epoch` ticks, page re-initialises) is
+**not** proof of new code: it re-fetches the same embedded bytes.
+
+To prove the running build really is current, in this order:
+1. `Get-Process kvm-inputpad` — its `StartTime` must be LATER than the mtime of every
+   embedded asset;
+2. fetch `http://127.0.0.1:8899/` and grep the served text for the change you expect;
+3. only then reload the webview.
+
+The `epoch` number in `strokes.d/<client>.jsonl` proves the page RE-INITIALISED. It does
+NOT prove which build it initialised into.
 
 Opening a second pad does not give a better measurement. It gives a **different pad**, with
 a different client id, a different canvas rect, and a different anchor — which is how earlier
 runs drew into a page nobody was watching.
+
 
 ---
 
@@ -37,14 +61,29 @@ a stray horizontal line produced exactly this way).
 **Instead:**
 - get the canvas rect by **measuring it, never by asking the server**: decode the three
   grey QR finder patterns the page paints at TL, TR and BL with `scripts/pad_bbox.py`
-  (a screenshot), or read the left/top already recorded in `scripts/pad_calib.json`.
-  An anchor back-solved from the trace is circular and has been wrong three times;
-- the pad has **no read-back API** — do not add one and do not use `GET /api/box` or
-  `GET /api/map` to learn where the canvas is. Those endpoints describe the page in its
-  own viewport coordinates, which are neither screen pixels nor trustworthy, and a
-  wrong answer from them is indistinguishable from a right one;
+  (a screenshot). An anchor back-solved from the trace is circular and has been wrong
+  three times;
+- `scripts/pad_calib.json` records an anchor MEASURED at some past moment, and is **not a
+  safe fallback**. Measured on this rig: a stroke aimed with it landed ~150 px from where
+  the pointer actually went. Treat it as a hypothesis to validate against a fresh probe,
+  never as an anchor to draw with. Its own note says "re-measure whenever the window is
+  resized", and you cannot know a resize did not happen;
+- **there is no screen-capture implementation on Windows.** `internal/capture` has only the
+  interface (`Unsupported`, which reports "unsupported on this platform") plus
+  `capture_x11_linux.go`. So `pad_bbox.py` has nothing to eat on this host: the fiducial
+  route is real on Linux/X11 only. Do not plan a screenshot-based measurement here until a
+  BitBlt implementation exists;
+- the pad has **no read-back API** for the canvas rect — do not add one. The
+  read-back endpoints (`/api/box`, `/api/map`, `/api/whoami`) have been REMOVED
+  from `cmd/kvm-inputpad`; they described the page in its own viewport
+  coordinates, which are neither screen pixels nor trustworthy, and a wrong
+  answer from them was indistinguishable from a right one. Do not reintroduce
+  them, and do not grow a replacement.
+  (`POST /api/log`, page → disk, and `GET /`, the page itself, are the only
+  endpoints left, and they are how every verification in this repo is done);
 - if a single confirmation click is truly needed, make **one** click, not a scan, and clear
   the trace immediately afterwards.
+
 
 ---
 
@@ -73,7 +112,37 @@ a stray horizontal line produced exactly this way).
 
 ---
 
-## 5. Working notes that save re-derivation
+## 5. You are a vision + input agent. Drive the desktop yourself.
+
+This agent is **not** a text-only assistant. It is an RPA-style operator with two
+capabilities that make the desktop its own to drive:
+
+- **Vision** — the `screen` tool captures the desktop and describes what is on it. That
+  is how screenshots are taken here. **Do not write screenshot/capture code** into this
+  repo to get one (the user's words: "你不需要去写任何有关屏幕截图的脚本. MyCC 已经为你提供了
+  足够的工具"). `internal/capture` stays X11-only and stays alone.
+- **Input** — the repo's own binary moves the pointer and clicks: `kvm mouse abs move X Y`,
+  then `kvm mouse rel down up`. (`scripts/ch9329ctl.py` does not exist; use the built
+  `kvm.exe`.) `kvm mouse pos` reads the pointer back.
+
+Because both halves are present, the agent is expected to **close the loop on its own**:
+find the window with `screen`, activate it (click the tab, or the VS Code icon on the
+taskbar), perform the action, then `screen` again and read the result back. This was
+demonstrated on this rig: `kvm mouse abs move 270 55` + a click switched VS Code to the
+`kvm inputpad 128x128` tab, and `screen` confirmed the pad had rendered.
+
+**Asking the user to click, switch tabs, or take a screenshot is a failure mode**, not a
+courtesy. Do it yourself unless it is genuinely impossible (e.g. a UAC/elevation prompt,
+a password field, or a locked workstation). "I can't see the screen" is not such a case —
+that is what `screen` is for.
+
+Two boundaries that still hold: driving the desktop does **not** license §2 (no pointer
+sweeps to scan the pad, no calibration ink left behind), and it does **not** license
+opening a second pad (§1).
+
+---
+
+## 6. Working notes that save re-derivation
 
 - The pointer witness on Windows is `GetCursorPos` (`internal/mouse/shellpos_windows.go`);
   there is no ring.

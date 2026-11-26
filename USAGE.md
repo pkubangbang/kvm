@@ -140,7 +140,6 @@ kvm-inputpad -addr 127.0.0.1:8899 -out strokes.d
 |---|---|---|
 | `-addr` | `127.0.0.1:8899` | listen address |
 | `-out` | `strokes.d` | directory of one trace file per client + `events.jsonl` |
-| `-box` | empty | grid rect `X,Y,W,H` in screen px, published at `/api/box` |
 
 ### HTTP surface
 
@@ -165,8 +164,11 @@ The pad is a **VS Code webview pane** on this rig, so the page's own rect
 (viewport CSS px) and screen px differ by more than a thousand pixels. Feed a
 viewport rect to `mouse abs move` and you will draw outside the canvas. Decode
 the three grey QR finder patterns at TL, TR and BL from a screenshot
-(`scripts/pad_bbox.py --json`) and you get the canvas origin in screen px
-directly, with no click and no back-solved origin.
+(`pad-bbox -grab -bbox`, or `scripts/pad_bbox.py --json` for a PNG you already
+have) and you get the canvas origin in screen px directly, with no click and no
+back-solved origin. `-grab` takes the screenshot itself on Windows, which is
+~80x faster than piping `ffmpeg -f gdigrab` through a PNG on disk: measured
+~20 ms of capture in a 50-66 ms run, against ~2066 ms for capture plus decode.
 
 ### A trace file
 
@@ -206,9 +208,10 @@ client id survives a reload.
    id and a different anchor.
 2. **Never locate the canvas by moving the pointer across it.** Calibration
    clicks are ink. Measure the canvas instead: decode the three grey QR finder
-   patterns at TL, TR and BL from a screenshot with `scripts/pad_bbox.py`, or
-   read the left/top already recorded in `scripts/pad_calib.json`. There is no
-   read-back endpoint to consult, and asking the server would not be evidence.
+   patterns at TL, TR and BL (`pad-bbox -grab -bbox`, or `scripts/pad_bbox.py`
+   for a PNG). There is no read-back endpoint to consult, and asking the server
+   would not be evidence. `scripts/pad_calib.json` records an anchor measured at
+   some past moment — validate it, never draw with it unconfirmed.
 3. **No calibration ink in a measured run.** Snapshot, clear, draw, verify.
 4. **Verify from the file, not the ledger.** Read the client's trace file and the
    `events.jsonl` tail together. There is no read-back endpoint: the page POSTs to

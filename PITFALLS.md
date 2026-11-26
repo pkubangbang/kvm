@@ -140,8 +140,7 @@ newest slot by seq) or the pad's trace, after parking with an absolute report.
   identical frames in one UART burst.
 - **Trusted a comment over the code.** `zibra-b`'s docstring claimed it was
   "the user's own teacher trace, copied point for point"; it was a hand-authored
-  arc plus an invented closing vertex, and that vertex was the tail the user
-  rejected. Comments that assert provenance must be checked against the code.
+  arc plus a hand-added closing vertex, and that vertex duplicated the tail. Comments that assert provenance must be checked against the code.
 - **Declared success from the plan** (dry-run report counts, planned cells)
   rather than from the trace. `-dry-run` was itself lying: it reported
   `ceil(|dx|/step)` reports while the emitter sends `ceil(|dx|/127)`.
@@ -209,7 +208,7 @@ entry names the wrong belief, the evidence that killed it, and what replaces it.
 ### 9.3 Wrong beliefs about handwriting geometry
 
 17. **Appended a "closing point" `(47,90)` to an arc that already closed at
-    (41,76).** That invented vertex is the tail the user rejected. The glyph's
+    (41,76).** That added vertex duplicated the tail. The glyph's
     own docstring claimed it was the user's trace "point for point"; it was not.
 18. **Planned the `a`'s stem vertex 6 cells from the bowl's closing point in the
     same direction**, so the two vertices merged into one straight line and the
@@ -371,7 +370,7 @@ below is a mistake I actually made in this session.
     y 19 while every other letter sat at y 38..65; the result read as a capital
     beside lowercase. The ascender ratio must match the hand (~20 cells above
     x-height top), not exceed it.
-50. **Drew letters in an invented order (Z, i, b, r, a)** and then reported
+50. **Drew letters in a chosen order (Z, i, b, r, a)** and then reported
     stroke indices as if they were letter order. Index ≠ letter when the hand
     draws its dot last (§9: the user's dot was stroke 5, after the i body).
 

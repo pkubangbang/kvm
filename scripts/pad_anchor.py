@@ -21,7 +21,7 @@ from the page at all, so it must be MEASURED.
 THE RULE THAT COST THIS PROJECT THREE WRONG ORIGINS
 ---------------------------------------------------
 An anchor fitted from the very points it is supposed to explain is circular:
-three invented anchors (978, 1117, 1120 px) were each "confirmed" that way and
+three anchors fitted that way (978, 1117, 1120 px) were each "confirmed" and
 each was wrong. So this script INSISTS on a HELD-OUT point:
 
   * `--fit SX,SY,RX,RY`    one observation: a screen point and the ratio the

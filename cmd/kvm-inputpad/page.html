@@ -42,9 +42,13 @@
  #pad{display:block;margin:0 auto;background:#fff;cursor:crosshair;
       box-shadow:0 0 0 1px #555;
       touch-action:none;-webkit-user-select:none;user-select:none;
-      width:768px;height:768px;
-      max-width:min(calc(100vw - 20px), calc(100vh - 80px));
-      max-height:min(calc(100vw - 20px), calc(100vh - 80px));
+      /* FIT THE VIEWPORT, SQUARE, NO SCROLLING. The user's requirement: the pad
+         must fit on screen without scrolling. The page chrome is two 40 px bars,
+         so the canvas gets the rest of the viewport height and is capped by the
+         width too; whichever is smaller wins. It stays SQUARE because a QR is
+         square and a distorted symbol does not decode. */
+      width:min(calc(100vw - 16px), calc(100vh - 96px));
+      height:min(calc(100vw - 16px), calc(100vh - 96px));
       aspect-ratio:1/1}
  .bar.bot{margin-top:auto}
 </style>
@@ -56,6 +60,7 @@
   </span>
 </div>
 <canvas id=pad width=768 height=768></canvas>
+<!--PAD_QR-->
 <div class="bar bot">
   <span id=hud>cell —,—</span>
   <span id=count>0 strokes</span>
@@ -81,11 +86,26 @@ const JSV = 5;
 // smaller side of the CSS box, so pos() and px() are exact inverses at any
 // display scale and a diagonal drag is never slanted.
 function fitSquare(){
-  const r = cv.getBoundingClientRect();
-  const side = Math.max(64, Math.round(Math.min(r.width, r.height)));
-  if(cv.width !== side){ cv.width = side; cv.height = side; }
-  return side;
+  // THE BACKING STORE IS FIXED. It used to be sized from
+  // getBoundingClientRect(), and because assigning canvas.width/height CLEARS
+  // the bitmap, every later layout pass silently wiped the symbol -- measured:
+  // the trace read `S=812 ctx=ok dark 0`, i.e. the paint loop ran with perfect
+  // data into a buffer that was cleared before it could be measured. A canvas
+  // that is drawn at a fixed resolution and SCALED BY CSS cannot be wiped by
+  // layout, and 768 = 128 cells x 6 px keeps one module per 6 px exactly.
+  return cv.width;
 }
+// REPAINT AFTER EVERY SIZE CHANGE. Without this the symbol is painted once at
+// load and then wiped by the next layout pass that resizes the buffer, which is
+// why the pad could look painted one moment and blank the next with no code
+// change in between.
+function repaint(){
+  grid();
+}
+if(typeof ResizeObserver !== 'undefined'){
+  new ResizeObserver(function(){ repaint(); }).observe(cv);
+}
+addEventListener('resize', repaint);
 // CORNER MARKERS (TODO-COORDINATES.md 9.2). QR-style fiducials THREE of the
 // four corners of the canvas, so that a SCREENSHOT can be decoded by a script
 // (scripts/pad_bbox.py) and the canvas rect recovered exactly -- replacing the
@@ -116,43 +136,143 @@ function fitSquare(){
 const MK_RING = 7;                 // the finder pattern itself
 const MK_CELLS = MK_RING + 2;      // + one separator cell on each side
 const MK_SEP = 1;                  // cells of light quiet zone around it
-// finder[y][x] over the 7x7 rings, 1 = dark. 1:1:3:1:1.
+// DARK and LIGHT are the only two values inside a marker, and BOTH are painted
+// explicitly -- the light ring is never left to the background.
+//
+// WHY THE LIGHT RING IS PAINTED INK-LIGHT (#b0b0b0), NOT WHITE: a screenshot of
+// this pad has NO white. The page background (#111) is darker than the pad
+// itself (#fff), and an ink stroke is #111 -- exactly the page background. So a
+// decoder that guesses polarity from "the minority of pixels" or from Otsu on
+// the WHOLE screen gets both its threshold and its polarity wrong: measured, it
+// picked 40 and then called the #fff pad "dark", which swallowed all three
+// markers. The fix is to give the marker its own unambiguous two-level
+// appearance, well clear of both the pad and the ink:
+//     dark cell  #9a9a9a   (~154)
+//     light cell #b0b0b0   (~176)
+// and the decoder binarizes INSIDE a marker once it has found one -- it never
+// needs a global threshold across pad, ink, page and chrome. A #111 stroke drawn
+// over a marker is still strictly darker than the lightest marker cell, so ink
+// still wins and can never hide behind the marker.
+const MK_DARK = '#000000', MK_LIGHT = '#ffffff';
+// finder[y][x] over the 7x7 rings, 1 = dark. THE TRUE ISO/IEC 18004 RATIO:
+// a solid 3x3 dark core, a one-cell light ring, a one-cell dark ring. Along any
+// centre line that is dark, light, dark, light, dark in 1:1:3:1:1.
+//
+// RETIRED FROM THE PAINT PATH. The page now paints the symbol's real finder
+// patterns out of qr_table.go (they are modules 0..6 of the symbol), so this
+// function is no longer called; it is kept only so the geometry it documents
+// stays readable next to the code that used to draw it. If you reintroduce a
+// hand-painted marker, you are rebuilding what the generated table already
+// contains -- and a hand-painted one will differ from it.
 function mkFinder(y, x){
   const d = Math.max(Math.abs(x - 3), Math.abs(y - 3));  // ring index 0..3
-  return (d === 3 || d <= 1) ? 1 : 0;                    // border + centre dark
+  return (d === 3 || d <= 1) ? 1 : 0;                    // border + core dark
 }
 // THREE corners, as a QR symbol has: TL, TR, BL. BR is deliberately bare.
 const MK_CORNERS = [[0,0],[N-MK_CELLS,0],[0,N-MK_CELLS]];
+
+// THE PAD CARRIES ONLY THE QR EYES -- three finder patterns, in DIM GREY.
+//
+// The user's instruction, verbatim: "only the eyes should be retained and
+// should be dimmed to grey". So the page no longer paints a whole version-27
+// symbol. What it paints is the calibration triad the rest of the toolchain
+// reads: the three 7x7 finder patterns of a QR, at the cells where a version-27
+// symbol puts them (modules 0..6 of the TL, TR and BL corners), with the light
+// separator at module 7.
+//
+// WHY THEY ARE STILL AT THE CANVAS CORNER AND NOT CENTRED. The eyes are the
+// fiducials scripts/pad_bbox.py and cmd/pad-bbox locate to recover the canvas
+// rect: TL finder flush at the canvas origin, TR at module 118, BL at module
+// 118 down. Move them and every measurement in this repo describes a rectangle
+// the window does not have. The 128-cell pad minus the 125-module symbol leaves
+// 3 cells of white quiet zone on the RIGHT and BOTTOM only -- the user's
+// "让右侧还有下方留出白边".
+//
+// WHY GREY AND NOT BLACK. A black eye at 6 px per module competes with the ink
+// a human draws on the same canvas; grey keeps the fiducial readable to a
+// decoder while leaving the pad looking like a writing surface. Grey is a
+// DARK/LIGHT pair, not a value: the eye's dark cells are EYE_DARK and the
+// separator ring and background are EYE_LIGHT, so a reader binarizes INSIDE the
+// eye and never needs a global threshold across pad, ink, page and chrome.
+//
+// Measured levels: dark cell #9a9a9a (~154), light #ffffff (~255). A #111 ink
+// stroke is still strictly darker than 154, so ink drawn over an eye still
+// wins and can never hide behind it.
+const EYE_DARK = '#9a9a9a', EYE_LIGHT = '#ffffff';
+// EYE_DX / EYE_DY nudge every eye by a fixed number of CELLS, applied before
+// the module->pixel rounding so the pattern lands exactly on the cell lattice
+// and its internal 1:1:3:1:1 finder runs stay pixel-exact. The user's
+// instruction: "move from the original position 1 cell right and 1 cell down"
+// (corrected from an earlier "1 pixel").
+//
+// A WHOLE-CELL SHIFT is not a small perturbation: at 6 px per cell it moves the
+// TL eye's outer corner from the canvas corner to (6,6), so a detector must NOT
+// assume the finder starts at module 0 -- it has to read the finder's own
+// position. That is the point of the note.
+const EYE_DX = 1, EYE_DY = 1;
+// mkFinder is the 7x7 finder over ring index d = max(|x-3|,|y-3|): dark at the
+// border (d==3) and the 3x3 core (d<=1), light in between. Along any centre
+// line that is dark, light, dark, light, dark in 1:1:3:1:1 -- the ISO/IEC 18004
+// ratio, and the same runs cmd/pad-bbox's TestFinderRatio checks.
+function mkFinder(y, x){
+  const d = Math.max(Math.abs(x - 3), Math.abs(y - 3));  // ring index 0..3
+  return (d === 3 || d <= 1) ? 1 : 0;                    // border + core dark
+}
+// marker() paints the three eyes described by window.PAD_EYES, one module per
+// cell, flush at the canvas origin. Each eye is 7 modules plus a one-module
+// separator on every side; the separator is painted light explicitly so an eye
+// still reads correctly if a coloured background is ever put behind it.
 function marker(S){
   const cell = S/N;
-  const dark='#9a9a9a', light='#ffffff';
-  for(const c of MK_CORNERS){
-    // SEPARATOR FIRST: repaint the quiet-zone cell white so the grid lines
-    // drawn a moment earlier cannot show through the finder pattern's margin.
-    g.fillStyle=light;
-    g.fillRect(Math.round(c[0]*cell), Math.round(c[1]*cell),
-               Math.ceil(MK_CELLS*cell), Math.ceil(MK_CELLS*cell));
-    g.fillStyle=dark;
-    for(let j=0;j<MK_RING;j++) for(let i=0;i<MK_RING;i++){
-      if(!mkFinder(j,i)) continue;
-      const cx=c[0]+MK_SEP+i, cy=c[1]+MK_SEP+j;
-      // Snap every cell to exact pixel edges: the last cell must meet the
-      // border with no hairline gap, and none may spill past the clip.
-      const x0=Math.round(cx*cell), y0=Math.round(cy*cell);
-      const x1=Math.round((cx+1)*cell), y1=Math.round((cy+1)*cell);
-      g.fillRect(x0, y0, Math.max(1,x1-x0), Math.max(1,y1-y0));
+  const e = window.PAD_EYES;
+  fillCalls = 0;
+  g.fillStyle = EYE_LIGHT;
+  g.fillRect(0, 0, S, S);
+  fillCalls++;
+  if(!e || !e.origins || e.origins.length !== 3){
+    // No eyes: paint nothing rather than an invented picture. A missing
+    // window.PAD_EYES is a build defect and must be visible, not plausible.
+    g.fillStyle = '#c00';
+    g.fillRect(0, 0, S, Math.max(4, cell*2));
+    fillCalls++;
+    return 0;
+  }
+  // Rect of module-run [a,b) of an eye whose origin is (ox,oy) cells.
+  function rect(ox, oy, x0, y0, x1, y1, col){
+    const px0 = Math.round((ox+x0+EYE_DX)*cell), py0 = Math.round((oy+y0+EYE_DY)*cell);
+    const px1 = Math.round((ox+x1+EYE_DX)*cell), py1 = Math.round((oy+y1+EYE_DY)*cell);
+    g.fillStyle = col;
+    g.fillRect(px0, py0, Math.max(1,px1-px0), Math.max(1,py1-py0));
+    fillCalls++;
+  }
+  for(const o of e.origins){
+    const sep = e.sep, mod = e.module;
+    // separator ring, then the 7x7 finder cell by cell in runs of one row
+    rect(o[0]-sep, o[1]-sep, 0, 0, mod+2*sep, mod+2*sep, EYE_LIGHT);
+    for(let y=0; y<mod; y++){
+      for(let x=0; x<mod; x++){
+        if(!mkFinder(y,x)) continue;
+        rect(o[0], o[1], x, y, x+1, y+1, EYE_DARK);
+      }
     }
   }
-  return MK_CELLS*cell;
+  return e.size*cell;
 }
+// lastS is the side the last grid() painted at, reported by the self-report so
+// a mismatch between "the buffer is 812 px" and "the box is 768 px" is VISIBLE
+// instead of inferred.
+let lastS = 0;
+let fillCalls = 0;
 function grid(){
   const S = fitSquare();
-  g.fillStyle='#fff'; g.fillRect(0,0,S,S);
-  const step = S/N;
-  g.fillStyle='#e6e6e6';
-  for(let i=0;i<N;i+=8){ g.fillRect(i*step,0,1,S); g.fillRect(0,i*step,S,1);}
-  g.fillStyle='#c8c8c8';
-  for(let i=0;i<N;i+=32){ g.fillRect(i*step,0,1,S); g.fillRect(0,i*step,S,1);}
+  lastS = S;
+  // marker() lays down the white canvas itself, so a second full-canvas fill
+  // here would only add a fillRect to the count for no pixels. One fill, then
+  // the eyes.
+  //
+  // NO GRID LINES. The pad's grid was a drawing aid for a blank canvas; the
+  // eyes are the aid now, and a rule every 8 cells would cut through the
+  // finder rings a decoder measures.
   marker(S);
 }
 // pos() is the ONE place a pointer event becomes a coordinate. It records PURE
@@ -334,28 +454,13 @@ document.getElementById('clear').onclick = function(){
 };
 
 // ---------------------------------------------------------------------------
-// publishBox reports the live canvas rect so a drawer can calibrate instead of
-// guessing px-per-cell. VIEWPORT coordinates only — pos() subtracts the
-// viewport r.left, so publishing document coordinates would be off by scroll.
+// (publishBox removed) The canvas rect is NOT published. It is a viewport-
+// relative CSS measurement, and the screen-space anchor a drawer needs also
+// requires the window's screen origin, which the page cannot observe. A
+// reader of a published rect gets a number that looks authoritative and is in
+// the wrong space. The pad is push-only: strokes travel page -> server -> the
+// stroke file on disk, and the file is the only truth.
 // ---------------------------------------------------------------------------
-function publishBox(){
-  const r = cv.getBoundingClientRect();
-  if(!(r.width > 0 && r.height > 0)) return;
-  fetch('/api/box', {method:'POST', headers:{'content-type':'application/json'},
-    body: JSON.stringify({x: Math.round(r.left), y: Math.round(r.top),
-                          w: Math.round(r.width), h: Math.round(r.height),
-                          scrollX: Math.round(window.scrollX || 0),
-                          scrollY: Math.round(window.scrollY || 0),
-                          jsv: JSV, dpr: window.devicePixelRatio || 1})})
-    .catch(() => {});
-}
-// A webview pane can change the canvas's CSS box without any resize event, so a
-// press also publishes. Registered ONCE per target; the old page registered the
-// visualViewport listener twice.
-cv.addEventListener('pointerdown', publishBox, {passive:true});
-addEventListener('resize', publishBox);
-if(window.visualViewport) visualViewport.addEventListener('resize', publishBox);
-addEventListener('scroll', publishBox, {passive:true});
 // A tab closing right after a lift would drop that stroke: keepalive lets the
 // request outlive the page.
 addEventListener('pagehide', function(){
@@ -364,6 +469,76 @@ addEventListener('pagehide', function(){
   try{ send(batch).catch(() => {}); }catch(e){}
 });
 
-publishBox();
-grid();
+// BOOTSTRAP AFTER LAYOUT, NOT DURING PARSING. grid() used to run here, at parse
+// time, before the browser had laid the canvas out: getBoundingClientRect()
+// could report a box the first layout pass then changed, and because assigning
+// canvas.width/height CLEARS the bitmap, the one paint that had happened was
+// thrown away with nothing left to repaint it. Two animation frames put the
+// first paint after layout settles; the ResizeObserver and the resize listener
+// keep it correct afterwards.
+function boot(){
+  // FIRST PAINT SYNCHRONOUSLY. A deferred-only first paint is fragile: if the
+  // animation-frame callback never fires the canvas stays white forever, and
+  // measured under headless Edge it never fired at all (`dark 0`). Painting
+  // immediately costs nothing and then the deferred pass corrects the size once
+  // layout has settled.
+  repaint();
+  selfReport();
+  const again = function(){
+    repaint();
+    selfReport();
+  };
+  if(typeof requestAnimationFrame === 'function'){
+    requestAnimationFrame(function(){ requestAnimationFrame(again); });
+  }
+  setTimeout(again, 50);
+  setTimeout(again, 250);
+}
+boot();
+// SELF-REPORT. The pad's own pixels are the only witness a screenshot cannot
+// contradict: count what is actually ON the canvas and say it in the status
+// line. Two vision reads of this window returned "QR visible" and "canvas
+// blank" for the same frame, so the verdict has to come from the canvas.
+function selfReport(){
+  try{
+    const w = cv.width, h = cv.height;
+    const d = g.getImageData(0, 0, w, h).data;
+    let dark = 0, grey = 0, minX = w, minY = h, maxX = -1, maxY = -1;
+    for(let y = 0; y < h; y++){
+      for(let x = 0; x < w; x++){
+        const i = (y*w + x)*4;
+        const r = d[i], gg = d[i+1], b = d[i+2];
+        // An eye cell: a neutral mid-luma pixel well clear of both white
+        // (255) and ink (#111 ~17). The band is deliberately narrow so a
+        // stray anti-aliased edge cannot masquerade as an eye.
+        if(Math.abs(r - gg) <= 6 && Math.abs(gg - b) <= 6 && r >= 120 && r <= 200){
+          grey++;
+          if(x < minX) minX = x;
+          if(x > maxX) maxX = x;
+          if(y < minY) minY = y;
+          if(y > maxY) maxY = y;
+        }
+        if(r < 128 && gg < 128 && b < 128) dark++;
+      }
+    }
+    const e = window.PAD_EYES;
+    // PROVE THE PAINT LOOP RAN. fillCalls counts fillRect invocations: if it
+    // is in the hundreds and grey is still 0, the loop drew into a buffer
+    // getImageData is not reading; if it is ~1, the loop never entered.
+    //
+    // EYES ARE GREY, NOT BLACK, so a black count of 0 is CORRECT here. What
+    // must be non-zero is `grey` -- the eye's #9a9a9a cells -- and the bbox
+    // below is computed from THAT, so it reports where the eyes actually are.
+    const trace = 'eyes=' + (e ? (e.size + '@' + e.grey) : 'undefined') +
+      ' S=' + lastS + ' ctx=' + (g ? 'ok' : 'null') +
+      ' fills=' + fillCalls + ' grey=' + grey;
+    live.textContent = 'canvas ' + w + 'x' + h + ' dark ' + dark + ' ' + trace +
+      (maxX >= 0 ? (' bbox ' + minX + ',' + minY + '..' + maxX + ',' + maxY) : ' bbox none');
+    document.title = 'kvm inputpad | canvas ' + w + 'x' + h + ' | dark ' + dark + ' | ' + trace +
+      (maxX >= 0 ? (' | bbox ' + minX + ',' + minY + '..' + maxX + ',' + maxY) : ' | bbox none');
+  }catch(err){
+    live.textContent = 'self-report failed: ' + err;
+  }
+}
+selfReport();
 </script>

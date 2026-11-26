@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,7 +39,7 @@ type Point struct {
 	// stretched box so a fixed px-per-cell cannot recover them.
 	//
 	// THE SERVER MUST KEEP THEM. This struct is the decode AND the encode
-	// shape of /api/trace, so a field missing here is silently dropped on the
+	// shape of the pad's stroke record, so a field missing here is silently dropped on the
 	// way to disk — measured: points written by the new page arrived with
 	// keys ts,x,y,fx,fy,epoch and the rx/ry the page had just started sending
 	// were gone, which made every later reader fall back to the lattice and
@@ -175,11 +176,42 @@ func clampCell(f float64) float64 {
 	return f
 }
 
+// buildStamp identifies THIS binary. It is set at link time with
+//
+//	go build -ldflags "-X main.buildStamp=$(git rev-parse --short HEAD)" ./cmd/kvm-inputpad
+//
+// and falls back to "dev" when built without it. A server that cannot say which
+// binary it is has already cost a whole measurement session: an OLD
+// kvm-inputpad-final.exe kept serving :8898 while the freshly built
+// kvm-inputpad.exe sat on disk unopened, so every run certified the wrong
+// program and the verdict had to be marked void. Publishing the stamp makes
+// that mistake visible in one request instead of one forensics session.
+var buildStamp = "dev"
+
+// startedAt is the process start instant, captured once so /api/whoami can
+// answer "how long has this server been up?" — the second half of the
+// stale-binary question. A build stamp says WHAT is running; an uptime says
+// whether that stamp is the one currently serving, or a leftover from an
+// earlier launch that still owns the port.
+var startedAt = time.Now()
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8899", "listen address")
 	out := flag.String("out", "strokes.d", "DIRECTORY holding one trace file per client plus events.jsonl")
 	box := flag.String("box", "", "grid rectangle X,Y,W,H in screen px (published at /api/box)")
 	flag.Parse()
+
+	// The identity line goes out FIRST, before any handler is registered, so a
+	// terminal that started this process always shows what is running. It
+	// carries the pid and the resolved out dir too: two pads on two ports are
+	// otherwise indistinguishable in a process list.
+	exe, _ := os.Executable()
+	built := "unknown"
+	if fi, err := os.Stat(exe); err == nil {
+		built = fi.ModTime().Format("2006-01-02 15:04:05")
+	}
+	log.Printf("kvm-inputpad identity: pid=%d build=%s exe=%s built=%s addr=%s out=%s",
+		os.Getpid(), buildStamp, exe, built, *addr, *out)
 
 	var g Box
 	var gMu sync.Mutex
@@ -270,6 +302,42 @@ func main() {
 	store := newTraceStore(*out)
 	http.HandleFunc("/api/log", store.handlePad)
 
+	// /api/whoami answers "which binary is serving me?" without touching the
+	// pad, the pointer, or the trace. It exists because the answer was
+	// previously only obtainable with Get-Process plus a StartTime comparison,
+	// and that was not done before three measurement runs — so they certified a
+	// stale binary and had to be marked void. Read-only, GET only.
+	http.HandleFunc("/api/whoami", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			writeJSONError(w, http.StatusMethodNotAllowed, "whoami is a GET")
+			return
+		}
+		var mod string
+		if fi, err := os.Stat(exe); err == nil {
+			mod = fi.ModTime().UTC().Format(time.RFC3339)
+		}
+		gMu.Lock()
+		b := g
+		gMu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"program":  "kvm-inputpad",
+			"build":    buildStamp,
+			"exe":      exe,
+			"exe_mtime": mod,
+			"pid":      os.Getpid(),
+			"addr":     *addr,
+			"out":      *out,
+			"started":  startedAt.UTC().Format(time.RFC3339),
+			// The box is included because "the page has not reported its rect
+			// yet" (x == -1) is the single most common reason /api/map refuses,
+			// and it is otherwise indistinguishable from a broken server.
+			"box": b,
+		})
+	})
+
 	doc := pageWithModules()
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -301,13 +369,6 @@ func main() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-// The page lives in page.html next to this file and is embedded at build time.
-// It used to be a Go raw string, which meant any backtick inside the page JS
-// terminated the string and broke the build — three times in one session. A
-// real asset file cannot have that class of bug.
-//
-//go:embed page.html
-var page string
 
 // THE PAGE IS THREE ASSETS, INLINED AT LOAD TIME.
 //
@@ -348,11 +409,7 @@ func pageWithModules() string {
 	return strings.Replace(page, "<!--PAD_MODULES-->", inline, 1)
 }
 
-// The page lives in page.html next to this file and is embedded at build time.
-// It used to be a Go raw string, which meant any backtick inside the page JS
-// terminated the string and broke the build — three times in one session. A
-// real asset file cannot have that class of bug.
-//
+
 //go:embed page.html
 var page string
 

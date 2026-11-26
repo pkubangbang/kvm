@@ -266,7 +266,135 @@ func TestSecondClearCountsOnlyItsOwnEpoch(t *testing.T) {
 	}
 }
 
-// --- the protocol itself ------------------------------------------------
+// --- the new page contract, round-tripped through the store --------------
+
+// The reworked page logs `down` at the FIRST INK of a stroke and `up` at the
+// lift, so every logged stroke is down+drag*+up with at least one segment. That
+// grouping must survive the store untouched — the store's job is to preserve the
+// sequence, not to reinterpret it. This asserts the exact epoch-28-shaped tail
+// the OLD page produced is no longer what the log contains: two downs against
+// two ups, no phantom pair at an identical point.
+func TestPairedGestureRoundTripsThroughStore(t *testing.T) {
+	s := newTraceStore(t.TempDir())
+
+	// Gesture 1: a Z-like path. `down` at the first ink (0.207), then drags.
+	post(t, s, "c", padEvent{Kind: "load", TS: 1})
+	post(t, s, "c", padEvent{Kind: "down", TS: 2, RX: f64(0.207), RY: f64(0.167)})
+	for i := 0; i < 5; i++ {
+		post(t, s, "c", padEvent{Kind: "drag", TS: int64(3 + i), RX: f64(0.3 + float64(i)*0.07), RY: f64(0.3)})
+	}
+	post(t, s, "c", padEvent{Kind: "up", TS: 9, RX: f64(0.661), RY: f64(0.722)})
+
+	// Gesture 2, separated by a real lift — no residual pair.
+	post(t, s, "c", padEvent{Kind: "down", TS: 100, RX: f64(0.235), RY: f64(0.190)})
+	post(t, s, "c", padEvent{Kind: "drag", TS: 101, RX: f64(0.5), RY: f64(0.3)})
+	post(t, s, "c", padEvent{Kind: "up", TS: 102, RX: f64(0.652), RY: f64(0.401)})
+
+	recs := records(t, s, "c")
+	var downs, ups int
+	open := false
+	var strokes [][]padRecord
+	var cur []padRecord
+	for _, r := range recs {
+		switch r.Kind {
+		case "down":
+			downs++
+			if open {
+				t.Fatalf("a down arrived while a stroke was already open: %v", kinds(recs))
+			}
+			open = true
+			cur = []padRecord{r}
+		case "drag":
+			if !open {
+				t.Fatalf("a drag arrived with no open stroke: %v", kinds(recs))
+			}
+			cur = append(cur, r)
+		case "up":
+			ups++
+			if !open {
+				t.Fatalf("an up arrived with no open stroke: %v", kinds(recs))
+			}
+			open = false
+			cur = append(cur, r)
+			strokes = append(strokes, cur)
+			cur = nil
+		}
+	}
+	if open {
+		t.Fatalf("a stroke was left open in the log: %v", kinds(recs))
+	}
+	if downs != 2 || ups != 2 {
+		t.Fatalf("downs=%d ups=%d, want 2/2 — the page's pairing did not survive the store", downs, ups)
+	}
+	if len(strokes) != 2 {
+		t.Fatalf("grouped %d strokes, want 2", len(strokes))
+	}
+	for i, st := range strokes {
+		if len(st) < 3 {
+			t.Fatalf("stroke %d holds %d records, want down+drag*+up", i, len(st))
+		}
+		if st[0].Kind != "down" || st[len(st)-1].Kind != "up" {
+			t.Fatalf("stroke %d = %v, want down ... up", i, kinds(st))
+		}
+	}
+}
+
+// A clear must retire the strokes before it and leave the epoch monotonic. This
+// is the "no retired ink returns" guarantee at the store level: after the clear
+// the highest epoch in the file is the clear's, and everything below it is
+// retired by construction.
+func TestClearRetiresAndEpochStaysMonotonic(t *testing.T) {
+	s := newTraceStore(t.TempDir())
+	post(t, s, "c", padEvent{Kind: "load", TS: 1})
+	post(t, s, "c", padEvent{Kind: "down", TS: 2, RX: f64(0.1), RY: f64(0.1)})
+	post(t, s, "c", padEvent{Kind: "up", TS: 3, RX: f64(0.2), RY: f64(0.2)})
+	post(t, s, "c", padEvent{Kind: "clear", TS: 4})
+
+	recs := records(t, s, "c")
+	// The epoch the pre-clear stroke lived in, and the epoch the clear opened.
+	var retired, clearEpoch int
+	for _, r := range recs {
+		switch r.Kind {
+		case "down", "up":
+			retired = r.Epoch
+		case "clear":
+			clearEpoch = r.Epoch
+		}
+	}
+	if clearEpoch <= retired {
+		t.Fatalf("clear did not open a new epoch: clear=%d retired=%d", clearEpoch, retired)
+	}
+	// The observer's rule: only the highest epoch is the current picture. A
+	// pre-clear stroke must NOT be in it.
+	for _, r := range recs {
+		if r.Epoch == clearEpoch && (r.Kind == "down" || r.Kind == "up" || r.Kind == "drag") {
+			t.Fatalf("pre-clear ink %q lives in the clear's epoch %d — retired ink is the current picture", r.Kind, clearEpoch)
+		}
+	}
+
+	// A post-clear stroke belongs to the epoch the clear opened: it is the new
+	// picture, and it is strictly above the retired generation.
+	post(t, s, "c", padEvent{Kind: "down", TS: 5, RX: f64(0.3), RY: f64(0.3)})
+	post(t, s, "c", padEvent{Kind: "up", TS: 6, RX: f64(0.4), RY: f64(0.4)})
+	recs = records(t, s, "c")
+	last := recs[len(recs)-1]
+	if last.Epoch != clearEpoch {
+		t.Fatalf("post-clear epoch = %d, want the clear's epoch %d", last.Epoch, clearEpoch)
+	}
+	if last.Epoch <= retired {
+		t.Fatalf("post-clear epoch = %d, want > retired %d — new ink landed in the retired generation", last.Epoch, retired)
+	}
+
+	// And the epochs in the file are non-decreasing: nothing was written behind
+	// the boundary.
+	prev := -1
+	for _, r := range recs {
+		if r.Epoch < prev {
+			t.Fatalf("epochs went backwards in one file: %d then %d", prev, r.Epoch)
+		}
+		prev = r.Epoch
+	}
+}
 
 func TestClientIDCannotEscapeDir(t *testing.T) {
 	dir := t.TempDir()

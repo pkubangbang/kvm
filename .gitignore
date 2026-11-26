@@ -35,4 +35,5 @@ node_modules/
 
 # Temp files from in-place edits (e.g. `kvm-inputpad.exe~`)
 *~
+/.tmp/
 

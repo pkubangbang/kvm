@@ -246,12 +246,16 @@ screen = anchor + ink x extent      # ink-space -> screen-space
 ink    = (screen - anchor) / extent # screen-space -> ink-space
 ```
 
-`extent` is the canvas's on-screen size (`/api/box` `w`,`h`), and `anchor` is a
+`extent` is the canvas's on-screen size (the CSS box, measured once from a
+screenshot and recorded in `scripts/pad_calib.json`), and `anchor` is a
 screen pixel pair that **must be measured, never inferred**:
 
 1. place the pointer with `kvm mouse abs move X Y` — screen-space, exact;
 2. click there (`mouse rel down drag 1 0 up` — one press/release, one process);
-3. read that point's `rx`,`ry` from `/api/trace` — ink-space, exact;
+3. read that point's `rx`,`ry` from the pad's own record — ink-space, exact. The page
+   POSTs each finished stroke to `/api/log`; `store.go` appends it to the newest
+   `strokes.d/<client>.jsonl`, so the record is a file, not an endpoint. (The old
+   read-back endpoint is gone for good — see `PAD-PROTOCOL.md` §5.)
 4. `anchor = (X, Y) - (rx x extent.w, ry x extent.h)`.
 
 Take the anchor from **two well-separated clicks** and test it on a **third**;
@@ -271,12 +275,13 @@ single report:
 
 Two further traps already measured on this rig:
 
-* `/api/box` reports the rect in **CSS px relative to the page viewport**, while
-  screen-space is desktop px. Converting between them needs the window's screen
+* The pad's own geometry is reported in **CSS px relative to the page viewport**,
+  while screen-space is desktop px. Converting between them needs the window's screen
   origin plus any viewport offset; the pad on this rig is a VS Code webview
   pane, so the two differ by more than a thousand pixels. Do not feed a screen
   pixel to `pos()`-derived maths, and do not feed a viewport rect to `mouse abs
-  move`.
+  move`. This is why the anchor is MEASURED from the page's own painted corner
+  markers (`scripts/pad_bbox.py`) rather than asked of the server.
 * The canvas box can be **non-square** (CSS `max-width`/`max-height`), so
   ink-to-px needs **one divisor per axis** (`w` for x, `h` for y). A single
   px-per-cell is the special case, not the rule.

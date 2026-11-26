@@ -30,7 +30,14 @@ const maxBodyBytes = 8 << 20
 // Protocol is the client<->server contract version. It is tied to the software
 // release: it stays 1 unless the SERVER CODE changes, and then it is bumped.
 // Every post carries it; a mismatch makes the client refresh (PAD-PROTOCOL.md §2).
-const Protocol = 1
+//
+// BUMPED 1 -> 2 with the ink-lingering rework. store.go changed: the epoch map
+// is now keyed by the FILE (sanitise(client)) instead of the raw client id, so a
+// page still running the pre-rework JS — which logs a `down` for a press that
+// draws nothing, producing the phantom down/up pairs the rework removes — must
+// be made to refresh rather than keep writing records the new reader
+// misinterprets. Refusal, not a silent accept: that is the protocol's rule.
+const Protocol = 2
 
 // padRecord is one line of the append-only log.
 //
@@ -176,32 +183,53 @@ func (t *traceStore) path(client string) string {
 }
 
 // clientLock serialises one client's file work. mu is released before the
-// client mutex is taken, so mu is never held across I/O.
+// client mutex is taken, so mu is never held across I/O. The lock is keyed by
+// the FILE (see epochKey): two raw ids that share a file must share the lock,
+// or concurrent posts from them interleave in one file.
 func (t *traceStore) clientLock(client string) func() {
 	t.mu.Lock()
-	l, ok := t.fileLocks[client]
+	l, ok := t.fileLocks[t.epochKey(client)]
 	if !ok {
 		l = &sync.Mutex{}
-		t.fileLocks[client] = l
+		t.fileLocks[t.epochKey(client)] = l
 	}
 	t.mu.Unlock()
 	l.Lock()
 	return l.Unlock
 }
 
+// Epoch keys are FILE keys. The log is one file per sanitised client id, and the
+// observer reads that file's highest epoch — so the generation counter must be
+// keyed exactly the way the file is. It used to be keyed by the RAW client id
+// while the file was keyed by sanitise(client), and newTraceStore() rehydrated
+// using the FILE's stem (the sanitised key). For any id sanitise() rewrites, the
+// rehydrated seat was never read: the first post-restart event was written at
+// epoch 0 behind an epoch-N boundary, which is exactly the retired-ink
+// resurrection the rehydration exists to prevent. Two raw ids that sanitise onto
+// one file also kept independent counters, making one file's epochs
+// non-monotonic.
+func (t *traceStore) epochKey(client string) string {
+	id := sanitise(client)
+	if id == "" {
+		id = "anonymous"
+	}
+	return id
+}
+
 // epoch reads a client's current generation. No I/O.
 func (t *traceStore) epoch(client string) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.epochs[client]
+	return t.epochs[t.epochKey(client)]
 }
 
 // bumpEpoch advances a client's generation — the clear path.
 func (t *traceStore) bumpEpoch(client string) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.epochs[client]++
-	return t.epochs[client]
+	k := t.epochKey(client)
+	t.epochs[k]++
+	return t.epochs[k]
 }
 
 // readLog parses an append-only log. A malformed line is skipped, not fatal: a

@@ -14,7 +14,7 @@ vocabulary to see the error while it was making it.
 | Unit | a fraction of the canvas CSS box (`rx`, `ry` in [0,1]) | one physical screen pixel |
 | Range | 0..1 per axis | 0..1919 x 0..1079 on this rig |
 | Written by | the page's `pos()` — the trace file | `mouse abs move` / `mouse pos` |
-| Read back by | `/api/trace`, `/api/box` | `kvm mouse pos` |
+| Read back by | the client file in `strokes.d` (newest by mtime) | `kvm mouse pos` |
 
 They are bridged by exactly one quantity, the pad's **anchor**: the *screen*
 coordinate of the canvas's top-left corner.
@@ -24,9 +24,11 @@ screen = anchor + ink * extent       # ink-space -> screen-space
 ink    = (screen - anchor) / extent  # screen-space -> ink-space
 ```
 
-`extent` = the canvas's on-screen size (`/api/box` `w`,`h`). The **anchor** must
-be MEASURED (absolute move -> click -> read `rx,ry` -> solve), never inferred
-from the very points it is meant to explain.
+`extent` = the canvas's on-screen size, measured once (553 x 553 on this rig) and
+recorded in `scripts/pad_calib.json`. The **anchor** must be MEASURED — by
+decoding the page's painted corner markers (`scripts/pad_bbox.py`), or by an
+absolute move -> click -> read `rx,ry` -> solve — never inferred from the very
+points it is meant to explain, and never asked of the server.
 
 ## 2. Failures this session, each of which was a language failure before it was
    an arithmetic failure
@@ -67,7 +69,7 @@ Recorded as a concrete proposal, not a wish:
 
 * **P1 — Quantity-tagged values.** Every coordinate-bearing tool result should
   carry its space explicitly, e.g. `mouse pos` -> `{"screen": [1229,108]}`,
-  `/api/trace` -> `{"ink": {"rx":0.2412,"ry":0.3150,"extent":[454,454]}}`,
+  the file in `strokes.d` (newest by mtime) -> `{"ink": {"rx":0.2412,"ry":0.3150,"extent":[454,454]}}`,
   `/api/map` -> `{"screen": [x,y], "ink": {...}, "cell": [cx,cy]}`. A result
   that cannot name its space is a bug in the tool, not a choice for the caller.
 * **P2 — One conversion tool, not N inline formulas.** `kvm pad anchor` /

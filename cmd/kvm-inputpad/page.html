@@ -61,8 +61,7 @@
   <span id=count>0 strokes</span>
   <span id=live></span>
 </div>
-<script src="/pad-core.js"></script>
-<script src="/pad-events.js"></script>
+<!--PAD_MODULES-->
 <script>
 // ===========================================================================
 // page.js — the canvas, the readouts, the log transport. NO STROKE STATE.
@@ -73,8 +72,10 @@ const live=document.getElementById('live');
 
 // JSV is THIS PAGE'S GENERATION. A tab keeps running the JS it loaded, so a
 // restarted server can be answering a page executing older code. BUMP THIS
-// whenever pos(), the recorded shape, or the module split changes.
-const JSV = 3;
+// whenever pos(), the recorded shape, or the module split changes — it is the
+// only signal that distinguishes "the page running now" from "the page that was
+// loaded before the rework".
+const JSV = 5;
 
 // POINTER SPACE. The grid must be SQUARE ON SCREEN: the buffer is resized to the
 // smaller side of the CSS box, so pos() and px() are exact inverses at any
@@ -85,6 +86,65 @@ function fitSquare(){
   if(cv.width !== side){ cv.width = side; cv.height = side; }
   return side;
 }
+// CORNER MARKERS (TODO-COORDINATES.md 9.2). QR-style fiducials THREE of the
+// four corners of the canvas, so that a SCREENSHOT can be decoded by a script
+// (scripts/pad_bbox.py) and the canvas rect recovered exactly -- replacing the
+// back-solved anchor, which was circular. The user's constraints, as recorded:
+//   * GREY cells, not black: a pen stroke drawn over a marker must COVER it
+//     (black wins), so the marker can never be mistaken for ink.
+//   * THREE markers, not four. This is what a QR symbol actually looks like:
+//     TL, TR and BL carry a finder pattern and the fourth corner is left bare.
+//     Four was an invention of ours -- the user's correction: "角上的二维码，你在4个
+//     角都画了，这是不对的". A fourth mark carries no information the other three
+//     do not already give (three corners fix both axes and the scale), so it
+//     was pure decoration and is now gone.
+// THE MARKER IS A REAL QR FINDER PATTERN, NOT AN INVENTION OF OURS.
+// The user's correction: "I was assuming the corner code is showing like a QR
+// corner but it seems you invent yourself". The earlier 9x9 blob with a 3x3 eye
+// and a nib was invented and no QR reader could decode it. This is the genuine
+// article (ISO/IEC 18004 finder pattern): 7x7 cells of concentric rings at
+// 1:1:3:1:1 -- a solid 3x3 centre, a one-cell light ring, a one-cell dark ring
+// -- surrounded by the mandatory one-cell LIGHT separator, so the whole mark is
+// 9x9 cells. Drawn at 6 px per cell on a 128 grid a mark is 6 cells wide
+// (36/768 of the side), and on this rig's 553 px canvas that is ~39 px: the
+// same size the earlier blob had, so the layout is unchanged and only the
+// picture becomes a QR corner.
+//
+// The separator must be WHITE, not bare canvas: the grid lines are drawn before
+// the marker, so without repainting the separator we would leave grid through
+// it and the quiet zone would not be quiet.
+const MK_RING = 7;                 // the finder pattern itself
+const MK_CELLS = MK_RING + 2;      // + one separator cell on each side
+const MK_SEP = 1;                  // cells of light quiet zone around it
+// finder[y][x] over the 7x7 rings, 1 = dark. 1:1:3:1:1.
+function mkFinder(y, x){
+  const d = Math.max(Math.abs(x - 3), Math.abs(y - 3));  // ring index 0..3
+  return (d === 3 || d <= 1) ? 1 : 0;                    // border + centre dark
+}
+// THREE corners, as a QR symbol has: TL, TR, BL. BR is deliberately bare.
+const MK_CORNERS = [[0,0],[N-MK_CELLS,0],[0,N-MK_CELLS]];
+function marker(S){
+  const cell = S/N;
+  const dark='#9a9a9a', light='#ffffff';
+  for(const c of MK_CORNERS){
+    // SEPARATOR FIRST: repaint the quiet-zone cell white so the grid lines
+    // drawn a moment earlier cannot show through the finder pattern's margin.
+    g.fillStyle=light;
+    g.fillRect(Math.round(c[0]*cell), Math.round(c[1]*cell),
+               Math.ceil(MK_CELLS*cell), Math.ceil(MK_CELLS*cell));
+    g.fillStyle=dark;
+    for(let j=0;j<MK_RING;j++) for(let i=0;i<MK_RING;i++){
+      if(!mkFinder(j,i)) continue;
+      const cx=c[0]+MK_SEP+i, cy=c[1]+MK_SEP+j;
+      // Snap every cell to exact pixel edges: the last cell must meet the
+      // border with no hairline gap, and none may spill past the clip.
+      const x0=Math.round(cx*cell), y0=Math.round(cy*cell);
+      const x1=Math.round((cx+1)*cell), y1=Math.round((cy+1)*cell);
+      g.fillRect(x0, y0, Math.max(1,x1-x0), Math.max(1,y1-y0));
+    }
+  }
+  return MK_CELLS*cell;
+}
 function grid(){
   const S = fitSquare();
   g.fillStyle='#fff'; g.fillRect(0,0,S,S);
@@ -93,6 +153,7 @@ function grid(){
   for(let i=0;i<N;i+=8){ g.fillRect(i*step,0,1,S); g.fillRect(0,i*step,S,1);}
   g.fillStyle='#c8c8c8';
   for(let i=0;i<N;i+=32){ g.fillRect(i*step,0,1,S); g.fillRect(0,i*step,S,1);}
+  marker(S);
 }
 // pos() is the ONE place a pointer event becomes a coordinate. It records PURE
 // CSS-BOX RATIOS (rx, ry in [0,1]); px() is their exact inverse. Deriving the
@@ -158,7 +219,7 @@ function clientId(){
   }
   return CLIENT_ID;
 }
-const PROTOCOL = 1;
+const PROTOCOL = 2;   // must equal store.go's Protocol; a mismatch makes this page reload
 let queue = [], flushT = 0;
 const PUSH_DEBOUNCE_MS = 120;
 let inFlight = Promise.resolve();
@@ -232,12 +293,16 @@ const bound = bindPad({
   onIgnore: function(why, e){ live.textContent = 'ignored: ' + why; },
 });
 
-push('load', null);
+// load is the page-reload boundary. The machine is told explicitly rather than
+// the transport pushing a bare 'load' event, so the machine's own state (a live
+// tail, an armed press, a pending commit) is retired with the ink. A reload must
+// start blank: nothing from the previous generation may be re-added.
+core.load();
 
 // ---------------------------------------------------------------------------
-// Export writes the PAGE'S OWN INK as a .json download. It used to GET
-// /api/trace, an endpoint deleted on purpose (PAD-PROTOCOL §5: the API receives
-// the log, the observer reads the file).
+// Export writes the PAGE'S OWN INK as a .json download. It used to GET a
+// server-side record route, deleted on purpose (PAD-PROTOCOL §5: the API
+// receives the log, the observer reads the file).
 // ---------------------------------------------------------------------------
 document.getElementById('save').onclick = function(){
   live.textContent = 'exporting…';
@@ -255,10 +320,14 @@ document.getElementById('save').onclick = function(){
 // Clear empties the page AND records the boundary in the log. The pending queue
 // is dropped with it: a stroke lifted just before the Clear must not arrive
 // after it, and send() queues the clear BEHIND any commit already dispatched.
+//
+// paintAll runs from the machine's onRepaint, so the canvas is blanked by the
+// SAME path that draws it — there is no second, competing erase. `core.clear()`
+// also drops a stroke the pen is still holding, so the lift that arrives after
+// this cannot commit pre-clear ink.
 document.getElementById('clear').onclick = function(){
   queue = []; clearTimeout(flushT);
   core.clear();
-  push('clear', null);
   flush();
   count.textContent = '0 strokes';
   live.textContent = 'cleared (new epoch)';

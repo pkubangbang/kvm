@@ -258,7 +258,7 @@ drawing buffer never changes.
 
 `/api/box` cannot help: `main.go:63` accepts a POST only while `g.X < 0`, so a launch with
 `-box 1057,182,767,773` freezes the published rect forever, and the page never posts its
-rect (the only `fetch()` calls in the page JS are the three `/api/trace` posts; there is no
+rect (the only `fetch()` calls in the page JS are the three `/api/log` posts; there is no
 `resize`/`visualViewport`/`scroll` listener).
 
 Numbers from the reported stroke:

@@ -170,6 +170,14 @@ func runFire(argv []string, origin bool, portFlag string, baudFlag int) {
 					rel.ForceRelease()
 					os.Exit(3)
 				}
+				// The flat span consumed the run exactly as the human arm does,
+				// so the cursor must jump past it too. This was missing: with no
+				// post-statement on the loop, `i` stayed on the FIRST drag,
+				// heldRun re-planned the same run every pass, and the stroke was
+				// redrawn forever -- pressing and releasing the button each time.
+				// Measured: `mouse rel -human=false down drag ... up` with a long
+				// run never returned. Advancing here is the whole fix.
+				i = end
 				continue
 			}
 			switch {

@@ -4,7 +4,7 @@
 The pad stores one JSON file per client under `-out <dir>` and no longer keeps a
 GET-able copy in memory, so every measurement script needs the same three steps:
 find the directory, find the right client file, and normalise the points. They
-used to each spell out a `curl :8898/api/trace`, which broke the moment the
+used to each shell out to the server's log endpoint, which broke the moment the
 server stopped answering GET from memory.
 
     from trace_read import read_trace

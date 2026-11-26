@@ -3,7 +3,7 @@
 
 Usage: pad_coverage.py [<trace.json>]
 
-Reads /api/trace (or the given file) and reports, per stroke and in total:
+Reads the pad's stroke record file (or the given file) and reports, per stroke and in total:
   * the cells touched by the recorded polyline (interpolated at 1 px, so a
     glide crossing a cell counts it even if no sample landed inside it),
   * the bounding box of those cells,

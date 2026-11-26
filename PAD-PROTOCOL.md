@@ -72,7 +72,7 @@ file is a duplicate, and is dropped.
 ### Consequence for certification
 
 A drawing is certified from the append-only file, and from nothing else. A run
-reported "certified" from `/api/trace` is not certified under this spec.
+reported "certified" from a client file read by hand is not certified under this spec.
 
 ---
 

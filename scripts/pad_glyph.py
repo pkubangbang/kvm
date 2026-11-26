@@ -26,7 +26,6 @@ import sys
 from trace_read import points_of
 
 KVM = "./kvm"
-PAD = "http://127.0.0.1:8898"
 TEACHER = "reference/pad-trace-raw.json"
 CALIB = "scripts/pad_calib.json"
 REPORT_PX = 6
@@ -38,33 +37,21 @@ def sh(args, timeout=180):
                           timeout=timeout)
 
 
-def box_now():
-    """The canvas rect the page publishes (empty dict if the server is absent)."""
-    try:
-        r = subprocess.run(["curl", "-s", PAD + "/api/box"], capture_output=True,
-                           text=True, timeout=10)
-        b = json.loads(r.stdout)
-        return b if isinstance(b, dict) else {}
-    except (ValueError, OSError):
-        return {}
-
-
 def calib():
     with open(CALIB) as fh:
         c = json.load(fh)
     # X and Y do NOT share a scale: the file carries 6.024 and 5.955, and using
-    # the X value for both put a 67-cell stem 4.6 px (0.77 cell) long. The box
-    # rect is a fallback only — the file is the measured pair.
+    # the X value for both put a 67-cell stem 4.6 px (0.77 cell) long.
     kx = c.get("px_per_cell", 6.0)
     ky = c.get("px_per_cell_y", kx)
-    b = box_now()
-    # Prefer the measured left/top; fall back to the live box, whose `x`/`y` are
-    # the canvas's own screen origin.
-    left = c.get("left", b.get("x"))
-    top = c.get("top", b.get("y"))
+    # left/top are the canvas's own screen origin, MEASURED and written into the
+    # calibration file. There is no fallback to the server: the pad is never
+    # asked to describe itself, because a wrong answer there is indistinguishable
+    # from a right one and silently displaces every glyph.
+    left = c.get("left")
+    top = c.get("top")
     if left is None or top is None:
-        raise SystemExit("no calibration: %s needs left/top, and /api/box is empty"
-                         % CALIB)
+        raise SystemExit("no calibration: %s needs measured left/top" % CALIB)
     return kx, ky, left, top
 
 

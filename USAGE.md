@@ -147,26 +147,26 @@ kvm-inputpad -addr 127.0.0.1:8899 -out strokes.d
 | Endpoint | Meaning |
 |---|---|
 | `GET /` | the page (draw on the canvas) |
-| `GET /api/box` | the canvas rect in **CSS px relative to the page viewport**, plus `scrollX/scrollY/jsv/dpr` |
-| `GET /api/map?x=&y=&ox=&oy=` | screen px → cell. `ox`/`oy` are **mandatory**: the screen origin of the page viewport. Returns `cell`, `x`, `y`, `fx`, `fy`, `inGrid` |
-| `GET /api/trace?client=ID` | the accumulated record for that client |
-| `POST /api/trace?client=ID` | append strokes; **`[]` clears** that client |
+| `POST /api/log` | append records (`load`, `down`, `drag`, `up`, `clear`) for a client; `store.go` writes them to `<out>/<client>.jsonl` |
 
-### `/api/box` is viewport-relative — not screen
+That is the whole surface the toolchain uses. The page has **no read-back
+endpoint** and must never grow one: the record lives on disk, and a reader that
+asks the server instead cannot tell a stale answer from a live one.
 
-It reports CSS px inside the page. Turning that into a screen coordinate needs
-the **window's client origin** added:
+(The server still exposes `GET /api/box` and `GET /api/map` for the page's own
+bookkeeping, but nothing in `scripts/` or the CLI may call them. They describe
+the canvas in the page's viewport coordinates, which are neither screen pixels
+nor independently verifiable; `scripts/pad_bbox.py` measures the canvas from the
+painted corner markers instead.)
 
-```
-canvas_screen_origin = window_client_origin + (box.x, box.y)
-```
+### Why the canvas rect is measured, not fetched
 
-On this rig the pad is a **VS Code webview pane**, so those two differ by more
-than a thousand pixels. Feed a viewport rect to `mouse abs move` and you will
-draw outside the canvas.
-
-The honest witness is `/api/map`: give it a screen point and the pane's origin
-and it answers `inGrid` without touching the pointer.
+The pad is a **VS Code webview pane** on this rig, so the page's own rect
+(viewport CSS px) and screen px differ by more than a thousand pixels. Feed a
+viewport rect to `mouse abs move` and you will draw outside the canvas. Decode
+the three grey QR finder patterns at TL, TR and BL from a screenshot
+(`scripts/pad_bbox.py --json`) and you get the canvas origin in screen px
+directly, with no click and no back-solved origin.
 
 ### A trace file
 
@@ -205,10 +205,13 @@ client id survives a reload.
    spare port for it. A second pad is a different pad with a different client
    id and a different anchor.
 2. **Never locate the canvas by moving the pointer across it.** Calibration
-   clicks are ink. Use `/api/box` + the window client origin, and confirm with
-   the read-only `/api/map`.
+   clicks are ink. Measure the canvas instead: decode the three grey QR finder
+   patterns at TL, TR and BL from a screenshot with `scripts/pad_bbox.py`, or
+   read the left/top already recorded in `scripts/pad_calib.json`. There is no
+   read-back endpoint to consult, and asking the server would not be evidence.
 3. **No calibration ink in a measured run.** Snapshot, clear, draw, verify.
-4. **Verify from the file, not the ledger.** Read the client's trace file and
-   `/api/trace` and the `events.jsonl` tail together.
+4. **Verify from the file, not the ledger.** Read the client's trace file and the
+   `events.jsonl` tail together. There is no read-back endpoint: the page POSTs to
+   `/api/log` and the server appends to disk.
 5. **If a run measured the wrong build, window, or client, mark it void** and
    say which.

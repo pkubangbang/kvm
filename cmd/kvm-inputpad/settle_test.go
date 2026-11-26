@@ -175,18 +175,23 @@ func TestCancelOnlyWhileButtonHeld(t *testing.T) {
 }
 
 // which means the model above could silently drift from the thing it is
-// supposed to describe. This reads the constant out of the page source and
-// fails if the two disagree, so a change to the page forces a matching change
+// supposed to describe. This reads the constant out of the machine's source and
+// fails if the two disagree, so a change to the machine forces a matching change
 // here rather than leaving a test that passes about code nobody runs.
+//
+// LIFT_SETTLE_MS USED TO BE IN page.html AND IS NOT ANY MORE. The stroke state
+// machine moved to pad-core.js, so this test failed at HEAD with "LIFT_SETTLE_MS
+// not found in the page source" — a red suite that predated this rework. The
+// constant lives with the code that owns it; this reads it there.
 func TestSettleWindowMatchesPage(t *testing.T) {
-	src, err := os.ReadFile("page.html")
+	src, err := os.ReadFile("pad-core.js")
 	if err != nil {
-		t.Fatalf("read page.html: %v", err)
+		t.Fatalf("read pad-core.js: %v", err)
 	}
 	re := regexp.MustCompile(`const LIFT_SETTLE_MS = (\d+);`)
 	m := re.FindSubmatch(src)
 	if m == nil {
-		t.Fatal("LIFT_SETTLE_MS not found in the page source — the guard may have been removed")
+		t.Fatal("LIFT_SETTLE_MS not found in pad-core.js — the guard may have been removed")
 	}
 	pageMS, err := strconv.Atoi(string(m[1]))
 	if err != nil {
@@ -194,7 +199,7 @@ func TestSettleWindowMatchesPage(t *testing.T) {
 	}
 	const modelMS = 40
 	if pageMS != modelMS {
-		t.Fatalf("page LIFT_SETTLE_MS = %d ms but this test models %d ms; update the model",
+		t.Fatalf("machine LIFT_SETTLE_MS = %d ms but this test models %d ms; update the model",
 			pageMS, modelMS)
 	}
 }

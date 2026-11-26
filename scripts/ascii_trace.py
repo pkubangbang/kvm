@@ -12,18 +12,14 @@ Usage: ascii_trace.py [--stroke -1] [--cols 44]
 """
 import argparse
 import json
-import urllib.request
 from trace_read import read_trace, points_of
 import os
-
-BASE = "http://127.0.0.1:8898"
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stroke", type=int, default=-1, help="index, -1 = newest")
     ap.add_argument("--cols", type=int, default=44, help="characters across")
-    ap.add_argument("--base", default=BASE)
     a = ap.parse_args()
 
     rec = read_trace(os.environ.get("KVM_PAD_OUT"))

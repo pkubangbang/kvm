@@ -8,7 +8,7 @@ The user's recipe:
   * one teacher point = one report (`drag dx dy`), the delta being measured from
     the previous emitted screen point.
 
-No /api/trace: the pad's canvas is the evidence, read with the screen tool, and
+No read-back endpoint: the pad's canvas is the evidence, read with the screen tool, and
 a draw is cleared with the pad's Clear button (the only thing that repaints an
 empty canvas — a server-side clear leaves the page's ink on screen).
 """

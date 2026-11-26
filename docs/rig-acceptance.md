@@ -41,7 +41,7 @@ can exit non-zero; **(c)** pad_glyph's first report is a rel delta and Y uses `p
 | `padhand.py` | n/a | **FAIL** | n/a | **PASS (n/a)** | `:30` `BUDGET_S = 5.0` used only as the `:105` subprocess timeout; `t0` at `:97` is **after** `park()` at `:96`; `:142` prints total, `:143` `return 0` — no comparison. Recovery `:109` `[KVM,"mouse","rel","up"]` is rejected by `internal/cli/parse.go:154-158`, a silent no-op. No fx/fy reader. |
 | `pad_glyph.py` | n/a | n/a | **FAIL both halves** | **PASS (n/a)** | `:101` `fx = fy = 0` ⇒ first `drag` at `:103` is the absolute (~1000 px) park coordinate; `:48` returns only `c["px_per_cell"]` and `:132` applies it to Y; `:126` `cal.get("top", box.get("y", 158))` ignores the live `-box` y |
 | `pad_draw_glyph.py` | n/a | n/a | n/a | **FAIL** | `:116` `p.get("fx", 0.5)`; also unpaced ≤6 px drags (`:99-106`) — the emitter that produced the 0.71 length ratio |
-| `pad_corr.py` | n/a | n/a | n/a | **FAIL** | `:43` `p.get("fx", 0.5)`; `:34` still curls the removed GET `/api/trace` (405) when `argv[2]` is omitted |
+| `pad_corr.py` | n/a | n/a | n/a | **FAIL** | `:43` `p.get("fx", 0.5)`; `:34` still curls the server's removed record route (405) when `argv[2]` is omitted |
 | `pad_coverage.py` | n/a | n/a | n/a | **FAIL** | `:33` `p.get("fx", 0.5)`; `:27` curls the 405 — and the bare invocation is its documented form (`:4`) |
 | `pad_trace.py` | n/a | n/a | n/a | **FAIL** | `:65` `p.get("fx", 0.5)`; `:141-142` divides geometry by `gain_x`/`gain_y` (1.072/1.066) on top of Go's `wireGainDiv = 1.55` (`internal/mouse/leg.go:56`) — dormant only because `pad_calib.json:6-7` currently pins 1.0 |
 
@@ -51,13 +51,13 @@ can exit non-zero; **(c)** pad_glyph's first report is a rel delta and Y uses `p
 `cdp_draw.py:87`, `z_geometry.py:20`) uses the true `0.0`; and two readers (`pad_corr.py:34`,
 `pad_coverage.py:27`, plus `pad_fidelity.py:29`, `pad_seq_corr.py:44`,
 `pad_copy_teacher.py:100`, `pad_leg_probe.py:40`, `ascii_trace.py:27`) still call the removed
-GET `/api/trace` (`store.go:182-189` → HTTP 405 + JSON body).
+GET the server's removed record route (`store.go:182-189` → HTTP 405 + JSON body).
 
 ---
 
 ## 3. No-display re-certification procedure
 
-### 3.1 Artifacts (no display, no browser, no `/api/trace`)
+### 3.1 Artifacts (no display, no browser, no server read-back)
 * Teacher fixture: `reference/pad-trace-raw.json`.
 * Drawn: the newest `<client-uuid>.json` in the server's `-out` **directory**. Running server
   for this session: `./kvm-inputpad -addr 127.0.0.1:8898 -box 1067,158,768,768 -out /tmp/padtrace`

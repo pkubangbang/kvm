@@ -46,7 +46,7 @@ USAGE
     python scripts/heart_check.py FILE.json --json         # machine-readable
 
     FILE is a pad trace as the server persists it (an ARRAY of strokes, each an
-    array of points with rx/ry), or the array of strokes as /api/trace returns.
+    array of points with rx/ry), or the array of strokes as the pad record holds.
 
     Exit status: 0 when the selected strokes all pass, 1 when any fails,
     2 on a usage/format error -- so a shell loop can gate on it.
@@ -411,7 +411,7 @@ def load(path):
     except json.JSONDecodeError as e:
         raise SystemExit("2|%s is not JSON: %s" % (path, e))
     if isinstance(data, dict):
-        # a commit reply from /api/trace carries the count, not the strokes
+        # a commit reply from the pad record carries the count, not the strokes
         strokes = data.get("strokes")
         if not isinstance(strokes, list):
             raise SystemExit("2|%s is an object without a strokes array" % path)

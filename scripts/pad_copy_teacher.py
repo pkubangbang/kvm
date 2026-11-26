@@ -21,7 +21,6 @@ import os
 
 KVM = "./kvm"
 PX = px_per_cell()   # measured, from pad_calib.json
-PAD = "http://127.0.0.1:8898"
 
 
 def sh(args, timeout=120):
@@ -54,11 +53,14 @@ def main():
         if a == "--oy":
             oy = int(args[i + 1])
 
-    # The teacher is in cell space; the pad box maps cell -> screen px.
-    box = json.loads(subprocess.run(["curl", "-s", PAD + "/api/box"],
-                                    capture_output=True, text=True,
-                                    timeout=10).stdout)
-    cx, cy = box.get("x", 0), box.get("y", 0)
+    # The teacher is in cell space; the canvas origin maps cell -> screen px. It
+    # is MEASURED (scripts/pad_bbox.py, or whatever wrote the calibration file)
+    # and handed in — the pad server is never asked where its own canvas is,
+    # because a stale or cached answer there displaces the whole glyph.
+    anchor = os.environ.get("PAD_ANCHOR")
+    if not anchor:
+        raise SystemExit("set PAD_ANCHOR=X,Y — the canvas top-left in screen px")
+    cx, cy = [int(v) for v in anchor.split(",")]
 
     for n, st in enumerate(teacher):
         pts = [(x + ox, y + oy)

@@ -27,7 +27,6 @@ import os
 
 KVM = "./kvm"
 PX = px_per_cell()   # measured, from pad_calib.json
-PAD = "http://127.0.0.1:8898"
 LEG = 210.0          # glyph square side in px
 GAP = 30.0           # gap between glyphs (px)
 

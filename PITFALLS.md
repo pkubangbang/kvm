@@ -35,10 +35,26 @@
 
 ## Pad
 21. **Pressed outside the grid rect** (1057–1824 × 182–955) — that drags the browser window, not ink.
-22. **Judged the drawing by the `/api/trace` count** instead of looking at the screen.
+22. **Judged the drawing by a stroke-record count** instead of looking at the screen.
 
 ## 5. Bench recovery and blind operation
 
+- **The CH9329's HID side can be present while its SERIAL side is gone — and the
+  HID side is useless to this tool.** Measured on Windows 2026-11-26:
+  `Get-PnpDevice -Class Ports` and a `WIN32_PNPEntity` filter for `VID_1A86`
+  together showed a healthy HID composite —
+  `USB\VID_1A86&PID_E12A\20250418XXXX`, `Status OK`, `ConfigManagerErrorCode 0`,
+  with keyboard/mouse/consumer/vendor HID interfaces all enumerated — while the
+  USB-serial half (`USB\VID_1A86&PID_55D3`, the CH343) had **no device and no
+  driver instance**: `[System.IO.Ports.SerialPort]::GetPortNames()` listed only
+  `COM2`, and opening `COM3` gave `Could not find file 'COM3'`. `kvm` has no HID
+  transport at all (`internal/mouse/device.go` → `ch9329.OpenDevice` →
+  `serial.Open`, `third_party/ch9329/port.go`), so "the device is in Device
+  Manager" is **not** evidence that a run can proceed. Check the *serial* node
+  specifically, and never infer absence from a `CH9329|CH34|CP210` **name**
+  filter — the composite's friendly names are the generic "USB 输入设备" /
+  "USB Composite Device", so a name-based search returns empty while the bridge
+  is right there. Filter on `DeviceID -match 'VID_1A86'`, then look for `PID_55D3`.
 - **The CH9329/WCH bridge can drop off the USB bus mid-session.** Symptom: every
   `kvm mouse` call exits 3 with `open /dev/ttyACM0 after retries: no such file or
   directory`. Diagnose without root: `ls /dev/ttyACM*`, `lsusb | grep -i 1a86`
@@ -49,7 +65,7 @@
 - **When the screen is unavailable, certify from the record, not from eyes.**
   `scripts/cert_z.py` measures the two witnesses that need no display: the ring
   (`/run/user/1000/kvm-cursor.ring`) and the pad's own stroke record
-  (`GET /api/trace`). A stroke is the page's record; the wire is the position.
+  (`the pad's own stroke record`). A stroke is the page's record; the wire is the position.
 - **A browser tab keeps running its old page after the server restarts.** Only a
   reload/new tab picks up new page JS (Ctrl+R by injection is unavailable — the
   compositor rejects the virtual-keyboard protocol). Make the server record
@@ -268,7 +284,7 @@ no longer exist.
 
 **Still open and worth doing (from the backlog, not done here):**
 
-- #6 GET `/api/trace` removal still referenced by scripts/docs.
+- #6 the pad's read-back route was removed — its references are now purged from scripts/docs.
 - #7 `fx`/`fy` `omitempty` misplacing samples by half a cell.
 - #8 `padturns.py` deletes turns >90°, so it cannot judge corners.
 - #9 `padhand.py` does not enforce the 5 s/letter rule.
@@ -569,3 +585,137 @@ pentagon, then a blue circle inscribed in it. What it took, and what tripped:
   zone; the fractional offsets are what make the record renderable as the line
   that was actually drawn.
 
+---
+
+## 20. inputpad: ink that will not go away
+
+**Symptom reported by the user, twice, in these words:** ink stays on the pad, so the
+next glyph is drawn over the last one and every trace is unusable.
+
+**What the source actually guarantees** (`cmd/kvm-inputpad/pad-core.js`):
+
+- `paintAll()` is the only erase. It repaints grid → committed → live tail from
+  scratch (`page.html:122`, wired as `onRepaint` at `page.html:208`).
+- Moves paint without erasing (`onInk` → `line()`, `page.html:207`). That is correct
+  while a stroke is open, and is exactly why a stroke that never *closes* leaves a
+  permanent line.
+- `commit()` repaints (`pad-core.js:303`) and `clear()` repaints after emptying
+  `committed` (`pad-core.js:312`). Both end with `onEvent`, not with an erase that
+  the page could skip.
+- The watchdog `armIdle()` (`IDLE_COMMIT_MS = 160 ms`, 12.5× the 40 ms settle) is
+  re-armed on **every accepted move**, so a stream that stops commits and the stroke
+  closes. A hung stroke therefore cannot survive a stopped stream for more than
+  160 ms.
+
+**So the erase path is sound, and the honest failure mode is the reverse of the
+complaint.** The two real hazards, in order of how likely they are to be what the
+user saw:
+
+1. **The ink was never ours to erase.** A second pad client writes to its own file
+   (`<out>/<client-id>.jsonl`). Measured: epoch 25 of our run contained **9 strokes
+   where we emitted 5** — strokes 6–9 (at `1659,361`, `1469,289→1522,344`, and a
+   zero-length stroke) were the user's own input on the same pad. Calling that
+   "lingering ink" would have been a false diagnosis of someone else's work. **Before
+   blaming the page, count strokes in our own client file and compare with the
+   strokes we commanded.**
+2. **`commit()` early-returns when `state === 'up'`** (`pad-core.js` line 1 of
+   `commit`). Points sitting in `tail` while the state has already flipped to `up`
+   are never pushed to `committed` and never repainted — the repaint below the early
+   return never runs. No path in the current machine reaches that combination
+   (`down` resets `last`, `up` transitions through `commit`), so it is a **latent**
+   hazard, not a measured one. Do not "fix" it by removing the guard without first
+   showing a trace that lands in it.
+
+**The measured trade, already documented in the code and worth repeating here:** a
+human who holds the button still for longer than `IDLE_COMMIT_MS = 160 ms` **during**
+a drag gets the stroke **split** at that point. A split is a better failure than ink
+that never clears, but it is a real limitation — it will show up as two strokes where
+one was intended, and it is not a bug to chase.
+
+**Experiment that would settle a live report without moving the pointer** (the
+pointer has been held by the user all session, so this is deliberate):
+
+1. read our client file's last epoch and its stroke count;
+2. read `events.jsonl` tail for the same epoch — it records one line per action;
+3. compare the pad's `N strokes` label (UIA text) with the file's stroke count.
+
+If the label exceeds the file count, the page is holding ink it never committed.
+If the label matches the file but the user sees a line, the ink is another client's
+— check `<out>/` for a second `<client-id>.jsonl` written in the same window. Only
+if the label is smaller than the visible ink is the page the culprit, and then the
+suspect is `paintAll` not being called, not `clear()` failing.
+
+**Do not** conclude from a screenshot alone. A screenshot shows every client's ink at
+once and cannot attribute it.
+
+---
+
+## 21. inputpad + held stream: a held span delivers ~0.76 of what you command
+
+**Measured twice on this rig, with two different cadences, same answer.**
+
+One held span `kvm mouse rel down drag 371 0 drag -371 371 drag 371 0 up` after
+`kvm mouse abs move 1359 240` (pen-down verified at exactly `1359,240`):
+
+| leg | commanded | delivered | ratio |
+|---|---|---|---|
+| 1 (right) | 371 px | 281 px | 0.76 |
+| 2 (down-left) | 371 / 371 px | dx 284, dy 281 px | 0.77 / 0.76 |
+| 3 (right) | 371 px | 286 px | 0.77 |
+
+Uniform on every leg and **both axes**, so it is not a per-axis extent error and not
+an anchor error — those produce different signatures (`PITFALLS.md` §19, `README.md`
+*Coordinates*).
+
+**Root cause, measured from the per-event log (not hypothesised):**
+
+| segment | Δt between pad samples | ΔX per sample |
+|---|---|---|
+| events 1–13 | **14–15 ms** | 9–10 px |
+| events 14–29 | **8–9 ms** | 9–10 px |
+| event 30→31 | 29 ms | corner |
+
+Three facts fall out of that table:
+
+1. **The pad samples ~9 px, not `HeldStepPx = 20`.** The page records one sample per
+   display frame (~16 ms), so one to two 20 px chip reports collapse into one sample.
+   Never read a 20 px stride out of a trace.
+2. **The cadence tightens mid-leg** (15 ms → 9 ms) and the leg **ends with three flat
+   samples at x = 1640**. The pointer genuinely stopped ~90 px short — this is not a
+   corner-detector artifact and not a recording artifact.
+3. The leg spent **~420 ms in flight to move 280 px**. 371 px at 19 reports × 12 ms
+   would be 228 ms. The host decelerates a held stream as a function of **wall-clock
+   time in flight**, not of report count.
+
+`writeReport` (`internal/mouse/transport.go`) treats `gap` as a **floor**: it writes,
+reads the ACK, judges the reply, and sleeps only the remainder. ACK-latency drift
+therefore changes the effective cadence, and the held band is narrow
+(`internal/mouse/leg.go` comments: 1.04× @2 ms, 0.89× @6 ms, 0.65× @12 ms).
+
+**Eliminated by measurement — do not re-run these:**
+
+| hypothesis | how it was killed |
+|---|---|
+| tail-report decay at `reportMaxPx = 127` | `evenReports` splits by **vector length ÷ `HeldStepPx`**, so the 127 cap never engages on a 371 px leg |
+| cadence is the cause | `wait 2` pacing gave **identical** endpoints and leg lengths |
+| reports silently dropped | `writeReport` judges the ACK; a rejected report returns an error, and none did |
+| wire vs log witness mismatch | both read `1640,528`, two stable reads |
+
+**Remedies that work, in order of preference:**
+
+1. **Ask for more than you want.** Command ≈ 488 px per 371 px leg (371 / 0.76).
+   Uniform, no code change, measured ratio.
+2. **Split long legs into ≤ 127 px reports** (3 × 127 = 381 px for 371) so the decay
+   term never enters. This is the protocol's own limit, not a workaround.
+3. **Shorten the leg.** The ratio worsens with time in flight, so a shorter stroke is
+   closer to 1:1.
+
+**Remedies that are wrong:**
+
+- **Doubling the request.** That lands back in the lossy band (40 px → 60 = 1.5×) and
+  the error changes sign and magnitude. `AGENTS.md` §5 says this explicitly and it was
+  still tried twice.
+- **Adding a gain divisor in `scaleByGain`.** It is identity by design; a global
+  divisor would break `abs move`, which is 1:1 and exact.
+- **Correcting after the stroke with a read-back.** One report per straight run, one
+  endpoint check at the end — no feedback loop inside a stroke (`AGENTS.md` §3).

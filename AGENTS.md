@@ -35,10 +35,14 @@ a stray horizontal line produced exactly this way).
 - perform multi-click calibration sweeps.
 
 **Instead:**
-- get the canvas rect from the server: `GET /api/box` (page/CSS coordinates) plus the
-  webview pane's screen origin;
-- convert screen → cell with `GET /api/map?x=&y=&ox=&oy=` — a **read-only** endpoint that
-  answers whether a point is in the grid without touching the pointer;
+- get the canvas rect by **measuring it, never by asking the server**: decode the three
+  grey QR finder patterns the page paints at TL, TR and BL with `scripts/pad_bbox.py`
+  (a screenshot), or read the left/top already recorded in `scripts/pad_calib.json`.
+  An anchor back-solved from the trace is circular and has been wrong three times;
+- the pad has **no read-back API** — do not add one and do not use `GET /api/box` or
+  `GET /api/map` to learn where the canvas is. Those endpoints describe the page in its
+  own viewport coordinates, which are neither screen pixels nor trustworthy, and a
+  wrong answer from them is indistinguishable from a right one;
 - if a single confirmation click is truly needed, make **one** click, not a scan, and clear
   the trace immediately afterwards.
 
@@ -50,8 +54,9 @@ a stray horizontal line produced exactly this way).
   that will be judged.
 - One anchor, validated once on a held-out point, is enough. Re-solving the anchor from the
   same clicks it is meant to explain is circular and has produced several wrong origins.
-- Verify after drawing from the **client's own trace file** (newest by mtime) **and**
-  `/api/trace` **and** the `events.jsonl` tail — in one batched read, not one call per turn.
+- Verify after drawing from the **client's own trace file** (newest by mtime) **and** the
+  `events.jsonl` tail — in one batched read, not one call per turn. There is no read-back
+  endpoint: the pad POSTs records to `/api/log` and `store.go` appends them to disk.
 
 ---
 
@@ -76,6 +81,8 @@ a stray horizontal line produced exactly this way).
   12 px ≈ 1:1, 6 px ≈ 0.66, 3 px ≈ 0.01. Never "fix" a shortfall by doubling the request —
   that lands back in the lossy band. See `internal/mouse/leg.go` and `PITFALLS.md` §6.
 - `heldStepPx = 20` subdivides held drags, so a `drag 45` becomes ~3×15 px reports.
-- `/api/trace` reports `strokes` for the batch and the file shape is the authority; read the
-  file, not the summary, when grouping matters.
+- The stroke record lives **only on disk**: `<out>/<client>.jsonl` holds one record per
+  line with kinds `load`, `down`, `drag`, `up`, `clear`; `events.jsonl` holds the per-action
+  ledger. The file shape is the authority — read the file, not a summary, when grouping
+  matters. There is no read-back endpoint; do not reintroduce one.
 - `.mycc/` is runtime state and must never be committed.

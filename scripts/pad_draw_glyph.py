@@ -18,13 +18,13 @@ and only then press, so the drawn stroke starts on the teacher's start cell.
 """
 import json
 import math
+import os
 import subprocess
 import sys
 from trace_read import points_of, px_per_cell
 
 KVM = "./kvm"
 PX = px_per_cell()   # measured, from pad_calib.json
-PAD = "http://127.0.0.1:8898"
 
 # Fitted from reference/pad-trace-raw.json by scripts/pad_fit_teacher.py.
 STEM = ((38.7, 26.5), (41.1, 90.7))
@@ -40,8 +40,13 @@ def sh(args, timeout=120):
 
 
 def box():
-    return json.loads(subprocess.run(["curl", "-s", PAD + "/api/box"],
-                                     capture_output=True, text=True, timeout=10).stdout)
+    """The canvas origin, MEASURED — never read back from the pad server."""
+    anchor = os.environ.get("PAD_ANCHOR")
+    if not anchor:
+        raise SystemExit("set PAD_ANCHOR=X,Y (canvas top-left in screen px, "
+                         "measured by scripts/pad_bbox.py)")
+    x, y = [int(v) for v in anchor.split(",")]
+    return {"x": x, "y": y}
 
 
 def ellipse_angle(cell_xy):

@@ -70,10 +70,15 @@ function bindPad(env) {
 
   cv.addEventListener('pointerdown', function (e) {
     // This pad draws with the primary button only. A press of another button is
-    // NOT a stroke and must not open the latch — but it also must not be able to
-    // leave the canvas in a half-open state, so it is reported, not ignored.
-    if (e.button !== undefined && e.button !== 0) {
+    // NOT a stroke and must not open the latch. It is still forwarded to the
+    // machine so a secondary press can be accounted for, but the machine is told
+    // it is not primary and refuses to open a stroke for it. Forwarding it
+    // rather than swallowing it here is what keeps the canvas from being left
+    // half-open: the machine decides, and the machine's answer is "no stroke".
+    const primary = e.button === undefined || e.button === 0;
+    if (!primary) {
       if (env.onIgnore) env.onIgnore('non-primary-button', e);
+      core.down('non-primary', e, { primary: false });
       return;
     }
     try { cv.setPointerCapture(e.pointerId); } catch (err) {}

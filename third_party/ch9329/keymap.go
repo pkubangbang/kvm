@@ -68,14 +68,32 @@ var shiftedUS = map[rune]struct {
 //	"enter" "esc" "tab"    a name from the table above (case-insensitive)
 //	"ctrl" "shift" "alt" "win"  a lone modifier -> usage 0, the bit set
 //	"ctrl+w" "shift+tab"   a chord: modifiers before '+', one final key
+//
+// A character's IMPLIED shift is folded into mods. keyUsage already reports
+// it (its second result: 'A' and '!' are shifted legends of the same physical
+// keys as 'a' and '1'), and TypeText has always consumed it; ParseKey used to
+// discard it, so a caller that sent ParseKey's result put the unshifted frame
+// on the wire. Measured: `tap A` and `tap a` produced byte-identical frames
+// (57 AB 00 02 08 00 00 04 ... 10), the manual's plain 'a' example, while the
+// manual's Shift+A vector is 57 AB 00 02 08 02 00 04 ... 12. 'A' typing as 'a'
+// is what that looked like to the user.
+//
+// An EXPLICIT prefix wins: "shift+a" and "A" resolve to the same frame, and a
+// prefix that already sets LeftShift is not doubled up.
 func ParseKey(spec string) (usage byte, mods byte, err error) {
 	m, key, ok := splitChord(spec)
 	if ok {
 		mods = m
 		spec = key
 	}
-	u, _, err := keyUsage(spec)
-	return u, mods, err
+	u, shift, err := keyUsage(spec)
+	if err != nil {
+		return u, mods, err
+	}
+	if shift && mods&ModLeftShift == 0 {
+		mods |= ModLeftShift
+	}
+	return u, mods, nil
 }
 
 // splitChord peels leading "mod+" segments off a spec.

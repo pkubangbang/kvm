@@ -1,9 +1,0 @@
-{
-  "px_per_cell": 2.625,
-  "px_per_cell_y": 2.625,
-  "left": 1075.0,
-  "top": 675.0,
-  "gain_x": 1.0,
-  "gain_y": 1.0,
-  "note": "anchor+extent MEASURED with pad-bbox -grab on the fresh on-screen rect x1 y1 x2 y2 = 1075 675 1410 1010 (canvas 336x336, cell 2.625); px_per_cell == extent/128. Re-measure whenever the window moves or resizes."
-}

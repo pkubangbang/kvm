@@ -33,7 +33,7 @@ fidelity, and driving a browser (PaintZ) end to end.
 | `internal/cursor` | Reader for the cursor ring (`/run/user/<uid>/kvm-cursor.ring`) |
 | `internal/cli`, `internal/config` | Argument grammar and configuration |
 | `internal/capture`, `internal/crosshair` | Screen capture and crosshair rendering |
-| `scripts/` | Python rigs used to draw, trace and certify glyphs |
+| `scripts/` | Shell helpers only (`deploy-extension.sh`); the Python rigs were removed |
 | `third_party/ch9329` | Vendored copy of the [ch9329](https://github.com/pkubangbang/ch9329ctl) driver (separate module, wired by `replace`) |
 | `pitfalls.md` | 19 sections, 80+ numbered pitfalls measured on this rig — read before changing motion code |
 | `zibra-z.md` | Recorded procedure for drawing a Z with certifiable evidence |
@@ -246,8 +246,8 @@ screen = anchor + ink x extent      # ink-space -> screen-space
 ink    = (screen - anchor) / extent # screen-space -> ink-space
 ```
 
-`extent` is the canvas's on-screen size (the CSS box, measured once from a
-screenshot and recorded in `scripts/pad_calib.json`), and `anchor` is a
+`extent` is the canvas's on-screen size (the CSS box, taken from the `pad-bbox -bbox`
+rect), and `anchor` is a
 screen pixel pair that **must be measured, never inferred**:
 
 1. place the pointer with `kvm mouse abs move X Y` — screen-space, exact;
@@ -281,18 +281,15 @@ Two further traps already measured on this rig:
   pane, so the two differ by more than a thousand pixels. Do not feed a screen
   pixel to `pos()`-derived maths, and do not feed a viewport rect to `mouse abs
   move`. This is why the anchor is MEASURED from the page's own painted corner
-  markers (`scripts/pad_bbox.py`) rather than asked of the server.
+  markers (`pad-bbox -grab`, the QR decode) rather than asked of the server.
 * The canvas box can be **non-square** (CSS `max-width`/`max-height`), so
   ink-to-px needs **one divisor per axis** (`w` for x, `h` for y). A single
   px-per-cell is the special case, not the rule.
 
-The Python scripts in `scripts/` consume that format: `pad_tracecheck.py`
-(per-stroke geometry), `pad_corr.py` (paired path error), `pad_coverage.py`
-(ink coverage), `heart_check.py` (turning-point/shape detector over a trace: vertices,
-curvature sign flips, tip, cleft, lobes, closure, aspect — the only shape
-verdict this project accepts), `heart_draw.py` (emit one CLOSED heart stroke
-whose legs are asserted to sum to zero, priced against the measured per-report
-cost so the stroke fits a wall-clock budget).
+The Python rigs that once consumed that format (trace checks, the heart
+shape detector and drawer, the PNG fiducial decoder) were removed; the trace
+array of `rx`/`ry` points is the whole contract, and `cmd/pad-bbox` now does the
+fiducial decode in-process.
 
 ---
 

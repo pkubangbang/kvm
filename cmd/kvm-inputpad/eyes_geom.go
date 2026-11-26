@@ -17,7 +17,7 @@ package main
 //	BL finder occupies grid cells (0..6, 118..124)
 //
 // with a light separator at module 7. That is not a choice; it is where a
-// version-27 QR puts its finders, and it is where scripts/pad_bbox.py and
+// version-27 QR puts its finders, and it is where pad-bbox and
 // cmd/pad-bbox look. The 128-cell pad minus the 125-module symbol leaves 3
 // cells of white quiet zone on the RIGHT and BOTTOM only -- the user's
 // "让右侧还有下方留出白边".

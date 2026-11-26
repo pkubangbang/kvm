@@ -60,19 +60,18 @@ a stray horizontal line produced exactly this way).
 
 **Instead:**
 - get the canvas rect by **measuring it, never by asking the server**: decode the three
-  grey QR finder patterns the page paints at TL, TR and BL with `scripts/pad_bbox.py`
-  (a screenshot). An anchor back-solved from the trace is circular and has been wrong
-  three times;
-- `scripts/pad_calib.json` records an anchor MEASURED at some past moment, and is **not a
-  safe fallback**. Measured on this rig: a stroke aimed with it landed ~150 px from where
-  the pointer actually went. Treat it as a hypothesis to validate against a fresh probe,
-  never as an anchor to draw with. Its own note says "re-measure whenever the window is
-  resized", and you cannot know a resize did not happen;
-- **there is no screen-capture implementation on Windows.** `internal/capture` has only the
+  grey QR finder patterns the page paints at TL, TR and BL with `pad-bbox -grab -bbox`
+  (in-process GDI capture on Windows; `-shot FILE` reads a PNG elsewhere). An anchor
+  back-solved from the trace is circular and has been wrong three times;
+- a stored calibration is **not a safe fallback**. The old `scripts/pad_calib.json` was
+  exactly that and is now deleted: measured on this rig, a stroke aimed with it landed
+  ~150 px from where the pointer actually went. Re-measure the rect before every draw and
+  never keep an anchor for reuse — you cannot know the window was not resized;
+- **`internal/capture` has no Windows implementation.** The library has only the
   interface (`Unsupported`, which reports "unsupported on this platform") plus
-  `capture_x11_linux.go`. So `pad_bbox.py` has nothing to eat on this host: the fiducial
-  route is real on Linux/X11 only. Do not plan a screenshot-based measurement here until a
-  BitBlt implementation exists;
+  `capture_x11_linux.go`. The fiducial route on this host is `cmd/pad-bbox`, whose
+  `-grab` mode BitBlts the screen itself on Windows (DPI-aware, ~20 ms) instead of going
+  through `internal/capture`; do not add a second capture implementation;
 - the pad has **no read-back API** for the canvas rect — do not add one. The
   read-back endpoints (`/api/box`, `/api/map`, `/api/whoami`) have been REMOVED
   from `cmd/kvm-inputpad`; they described the page in its own viewport
@@ -122,8 +121,8 @@ capabilities that make the desktop its own to drive:
   repo to get one (the user's words: "你不需要去写任何有关屏幕截图的脚本. MyCC 已经为你提供了
   足够的工具"). `internal/capture` stays X11-only and stays alone.
 - **Input** — the repo's own binary moves the pointer and clicks: `kvm mouse abs move X Y`,
-  then `kvm mouse rel down up`. (`scripts/ch9329ctl.py` does not exist; use the built
-  `kvm.exe`.) `kvm mouse pos` reads the pointer back.
+  then `kvm mouse rel down up`. (Use the built
+  `kvm.exe`; there is no Python driver.) `kvm mouse pos` reads the pointer back.
 
 Because both halves are present, the agent is expected to **close the loop on its own**:
 find the window with `screen`, activate it (click the tab, or the VS Code icon on the

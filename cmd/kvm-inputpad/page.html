@@ -108,7 +108,7 @@ if(typeof ResizeObserver !== 'undefined'){
 addEventListener('resize', repaint);
 // CORNER MARKERS (TODO-COORDINATES.md 9.2). QR-style fiducials THREE of the
 // four corners of the canvas, so that a SCREENSHOT can be decoded by a script
-// (scripts/pad_bbox.py) and the canvas rect recovered exactly -- replacing the
+// (pad-bbox) and the canvas rect recovered exactly -- replacing the
 // back-solved anchor, which was circular. The user's constraints, as recorded:
 //   * GREY cells, not black: a pen stroke drawn over a marker must COVER it
 //     (black wins), so the marker can never be mistaken for ink.
@@ -181,7 +181,7 @@ const MK_CORNERS = [[0,0],[N-MK_CELLS,0],[0,N-MK_CELLS]];
 // separator at module 7.
 //
 // WHY THEY ARE STILL AT THE CANVAS CORNER AND NOT CENTRED. The eyes are the
-// fiducials scripts/pad_bbox.py and cmd/pad-bbox locate to recover the canvas
+// fiducials cmd/pad-bbox locates to recover the canvas
 // rect: TL finder flush at the canvas origin, TR at module 118, BL at module
 // 118 down. Move them and every measurement in this repo describes a rectangle
 // the window does not have. The 128-cell pad minus the 125-module symbol leaves

@@ -2,8 +2,9 @@ package main
 
 // qr_table.go -- the inputpad's QR symbol, as a module table.
 //
-// GENERATED FILE, DO NOT EDIT BY HAND.  Produced by .tmp/gen_qr.py, which
-// calls segno 1.6.6 (a reference ISO/IEC 18004 implementation) with:
+// GENERATED FILE, DO NOT EDIT BY HAND.  Produced by a throwaway segno 1.6.6
+// script (a reference ISO/IEC 18004 implementation; the generator was not kept)
+// with:
 //
 //     payload     'kvm'
 //     version     27      (125 x 125 modules)

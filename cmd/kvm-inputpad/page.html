@@ -1,0 +1,300 @@
+<!doctype html><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>kvm inputpad 128x128</title>
+<!--
+  THE PAGE IS NOW THREE FILES, ON PURPOSE.
+
+    1. page.html          — chrome, CSS, and the DOM/canvas plumbing (this file)
+    2. pad-core.js        — THE STROKE STATE MACHINE. down -> drag* -> up over
+                            data, no DOM, no timers it does not own.
+    3. pad-events.js      — the DOM event layer. Translates browser events into
+                            machine calls. Owns no latch and no ink.
+
+  Why: the capture logic used to be four listeners sharing three module globals
+  (`down`, `last`, `pts`) plus a 40 ms settle timer that lived next to the
+  listeners. The user's report — "mouse down, move and up are not correctly
+  captured" and "the most up events in particular is not captured correctly
+  causing the ink to linger" — is a property of that arrangement, not of any one
+  line. Splitting the state machine out is what makes the transitions inspectable
+  and testable outside a browser (`node --test`).
+
+  Load order matters and is enforced by the shims below.
+
+  NOTE: no backticks anywhere in this file's script — it is served as a single
+  asset and a backtick inside a template literal here has broken the build
+  before. The rule still applies to any string we emit.
+-->
+<style>
+ body{margin:0;font:13px system-ui;background:#111;color:#eee;
+      min-height:100vh;display:flex;flex-direction:column}
+ .bar{display:flex;align-items:center;height:40px;box-sizing:border-box;
+      padding:0 10px;overflow:hidden;column-gap:10px}
+ .bar.top{justify-content:space-between}
+ .bar.bot{justify-content:flex-start;gap:14px;font:12px/20px ui-monospace,monospace}
+ .bar.bot #live{margin-left:auto}
+ .title{font:600 14px/20px system-ui;letter-spacing:.3px;flex:none;overflow:visible}
+ .actions{display:flex;gap:8px;flex:none}
+ .bar button{height:26px;box-sizing:border-box}
+ .bar span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ #hud{flex:none;width:15ch}
+ #count{flex:none;width:16ch}
+ #live{flex:none;width:30ch;min-width:30ch;text-align:right;color:#9aa}
+ #pad{display:block;margin:0 auto;background:#fff;cursor:crosshair;
+      box-shadow:0 0 0 1px #555;
+      touch-action:none;-webkit-user-select:none;user-select:none;
+      width:768px;height:768px;
+      max-width:min(calc(100vw - 20px), calc(100vh - 80px));
+      max-height:min(calc(100vw - 20px), calc(100vh - 80px));
+      aspect-ratio:1/1}
+ .bar.bot{margin-top:auto}
+</style>
+<div class="bar top">
+  <span class="title">Inputpad</span>
+  <span class="actions">
+    <button id=clear>Clear</button>
+    <button id=save>Export</button>
+  </span>
+</div>
+<canvas id=pad width=768 height=768></canvas>
+<div class="bar bot">
+  <span id=hud>cell —,—</span>
+  <span id=count>0 strokes</span>
+  <span id=live></span>
+</div>
+<script src="/pad-core.js"></script>
+<script src="/pad-events.js"></script>
+<script>
+// ===========================================================================
+// page.js — the canvas, the readouts, the log transport. NO STROKE STATE.
+// ===========================================================================
+const N=128, cv=document.getElementById('pad'), g=cv.getContext('2d');
+const hud=document.getElementById('hud'), count=document.getElementById('count');
+const live=document.getElementById('live');
+
+// JSV is THIS PAGE'S GENERATION. A tab keeps running the JS it loaded, so a
+// restarted server can be answering a page executing older code. BUMP THIS
+// whenever pos(), the recorded shape, or the module split changes.
+const JSV = 3;
+
+// POINTER SPACE. The grid must be SQUARE ON SCREEN: the buffer is resized to the
+// smaller side of the CSS box, so pos() and px() are exact inverses at any
+// display scale and a diagonal drag is never slanted.
+function fitSquare(){
+  const r = cv.getBoundingClientRect();
+  const side = Math.max(64, Math.round(Math.min(r.width, r.height)));
+  if(cv.width !== side){ cv.width = side; cv.height = side; }
+  return side;
+}
+function grid(){
+  const S = fitSquare();
+  g.fillStyle='#fff'; g.fillRect(0,0,S,S);
+  const step = S/N;
+  g.fillStyle='#e6e6e6';
+  for(let i=0;i<N;i+=8){ g.fillRect(i*step,0,1,S); g.fillRect(0,i*step,S,1);}
+  g.fillStyle='#c8c8c8';
+  for(let i=0;i<N;i+=32){ g.fillRect(i*step,0,1,S); g.fillRect(0,i*step,S,1);}
+}
+// pos() is the ONE place a pointer event becomes a coordinate. It records PURE
+// CSS-BOX RATIOS (rx, ry in [0,1]); px() is their exact inverse. Deriving the
+// ratio from the CSS box while multiplying by the backing store is what made
+// ink drift away from the cursor off-centre.
+function pos(e, rect){
+  const r = rect || cv.getBoundingClientRect();
+  if(!(r.width > 0 && r.height > 0)) return null;
+  const rx = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  const ry = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height));
+  const u = rx * N, v = ry * N;
+  const x = Math.min(N - 1, Math.floor(u)), y = Math.min(N - 1, Math.floor(v));
+  return { x:x, y:y, fx:u-x, fy:v-y, rx:rx, ry:ry };
+}
+function px(p){
+  const fx = p.fx === undefined ? 0.5 : p.fx, fy = p.fy === undefined ? 0.5 : p.fy;
+  const rxi = p.rx === undefined ? (p.x + fx) / N : p.rx;
+  const ryi = p.ry === undefined ? (p.y + fy) / N : p.ry;
+  return { x: rxi * cv.width, y: ryi * cv.height };
+}
+function line(a,b){
+  const A=px(a), B=px(b);
+  g.strokeStyle='#111'; g.lineWidth=2; g.lineCap='round';
+  g.beginPath(); g.moveTo(A.x,A.y); g.lineTo(B.x,B.y); g.stroke();
+}
+// paintAll is the ONLY erase. It repaints the whole canvas from the machine's
+// snapshot, so ink that is not in the snapshot cannot survive a repaint.
+function paintAll(snap){
+  grid();
+  const strokes = snap ? snap.strokes : core.committed;
+  for(const st of strokes) for(let i=1;i<st.length;i++) line(st[i-1], st[i]);
+  const tailPts = snap ? snap.live : core.tail;
+  for(let i=1;i<tailPts.length;i++) line(tailPts[i-1], tailPts[i]);
+  count.textContent = (snap ? snap.strokes : core.committed).length + ' strokes';
+}
+
+// ---------------------------------------------------------------------------
+// LOG TRANSPORT. One event per input; the log is an EVENT LOG, so the observer
+// reconstructs strokes from down/drag/up. The page never sends a stroke.
+// ---------------------------------------------------------------------------
+const TS_KEY = 'kvm-pad-last-ts';
+let lastTS = 0;
+try { lastTS = parseInt(sessionStorage.getItem(TS_KEY) || '0', 10) || 0; } catch(err) {}
+// STRICTLY INCREASING. Date.now() has 1 ms granularity and the host can deliver
+// a press and its first move, or two moves, inside one millisecond, so two
+// events of one gesture could share a ts and the store de-duplicated one away
+// (measured: a 315 px drag reduced to two records).
+function nextTS(){
+  const n = Date.now();
+  lastTS = n > lastTS ? n : lastTS + 1;
+  try { sessionStorage.setItem(TS_KEY, String(lastTS)); } catch(err) {}
+  return lastTS;
+}
+const CLIENT_KEY = 'kvm-pad-client';
+let CLIENT_ID = null;
+function clientId(){
+  if(CLIENT_ID) return CLIENT_ID;
+  try { CLIENT_ID = sessionStorage.getItem(CLIENT_KEY); } catch(err) {}
+  if(!CLIENT_ID){
+    CLIENT_ID = crypto.randomUUID ? crypto.randomUUID()
+              : 'pad-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10);
+    try { sessionStorage.setItem(CLIENT_KEY, CLIENT_ID); } catch(err) {}
+  }
+  return CLIENT_ID;
+}
+const PROTOCOL = 1;
+let queue = [], flushT = 0;
+const PUSH_DEBOUNCE_MS = 120;
+let inFlight = Promise.resolve();
+function send(body){
+  const payload = {client: clientId(), version: PROTOCOL, events: body};
+  const my = inFlight.then(() => fetch('/api/log', {
+      method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify(payload), keepalive: true})
+    .then(r => {
+      if(r.status === 409){
+        live.textContent = 'protocol mismatch — reloading';
+        setTimeout(() => location.reload(), 0);
+        return Promise.reject('protocol mismatch');
+      }
+      return r.ok ? r.json() : Promise.reject('HTTP ' + r.status);
+    }));
+  inFlight = my.catch(() => {});
+  return my;
+}
+function flush(){
+  if(!queue.length) return;
+  const batch = queue; queue = [];
+  send(batch)
+    .then(res => { live.textContent = 'appended ' + res.appended + ' event(s), '
+                                  + res.duplicates + ' duplicate(s)'; })
+    .catch(err => {
+      // A failed batch goes back on the queue so input that happened on screen
+      // is retried instead of lost. flush() re-sends the SAME kind and ts, which
+      // is why the store's de-dup key includes kind and retries stay idempotent.
+      queue = batch.concat(queue);
+      live.textContent = 'append failed: ' + err;
+    });
+}
+function push(kind, at){
+  const ev = {kind: kind, ts: nextTS()};
+  if(at){ ev.rx = at.rx; ev.ry = at.ry; }
+  queue.push(ev);
+  clearTimeout(flushT);
+  flushT = setTimeout(flush, PUSH_DEBOUNCE_MS);
+}
+
+// ---------------------------------------------------------------------------
+// THE MACHINE. pad-core.js is CommonJS, so it arrives here as a module record.
+// ---------------------------------------------------------------------------
+const core = createPadCore({
+  posOf: function(ev){ return ev && ev.rx !== undefined ? ev : pos(ev); },
+  onInk: function(from, to){ if(from) line(from, to); },
+  onRepaint: function(snap){ paintAll(snap); },
+  onEvent: function(kind, at){ push(kind, at); },
+  onTransition: function(from, to, why){
+    // The observable record of a capture bug: every latch change names itself.
+    lastTransition = to + '(' + why + ')';
+  },
+});
+let lastTransition = '';
+const bound = bindPad({
+  canvas: cv,
+  windowTarget: window,
+  core: core,
+  posOf: function(ev){ return pos(ev); },
+  onSample: function(){ /* the machine already painted; nothing to record here */ },
+  show: function(e){
+    const r = cv.getBoundingClientRect();
+    if(e.clientX < r.left || e.clientX >= r.right || e.clientY < r.top || e.clientY >= r.bottom){
+      hud.textContent = 'off-grid'; return;
+    }
+    const p = pos(e, r);
+    if(!p) return;
+    hud.textContent = 'cell ' + Math.floor(p.rx*N) + ', ' + Math.floor(p.ry*N);
+  },
+  onIgnore: function(why, e){ live.textContent = 'ignored: ' + why; },
+});
+
+push('load', null);
+
+// ---------------------------------------------------------------------------
+// Export writes the PAGE'S OWN INK as a .json download. It used to GET
+// /api/trace, an endpoint deleted on purpose (PAD-PROTOCOL §5: the API receives
+// the log, the observer reads the file).
+// ---------------------------------------------------------------------------
+document.getElementById('save').onclick = function(){
+  live.textContent = 'exporting…';
+  const strokes = core.committed;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const name = 'padtrace-' + stamp + '.json';
+  const blob = new Blob([JSON.stringify(strokes, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+  live.textContent = 'exported ' + strokes.length + ' stroke(s)';
+};
+// Clear empties the page AND records the boundary in the log. The pending queue
+// is dropped with it: a stroke lifted just before the Clear must not arrive
+// after it, and send() queues the clear BEHIND any commit already dispatched.
+document.getElementById('clear').onclick = function(){
+  queue = []; clearTimeout(flushT);
+  core.clear();
+  push('clear', null);
+  flush();
+  count.textContent = '0 strokes';
+  live.textContent = 'cleared (new epoch)';
+};
+
+// ---------------------------------------------------------------------------
+// publishBox reports the live canvas rect so a drawer can calibrate instead of
+// guessing px-per-cell. VIEWPORT coordinates only — pos() subtracts the
+// viewport r.left, so publishing document coordinates would be off by scroll.
+// ---------------------------------------------------------------------------
+function publishBox(){
+  const r = cv.getBoundingClientRect();
+  if(!(r.width > 0 && r.height > 0)) return;
+  fetch('/api/box', {method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify({x: Math.round(r.left), y: Math.round(r.top),
+                          w: Math.round(r.width), h: Math.round(r.height),
+                          scrollX: Math.round(window.scrollX || 0),
+                          scrollY: Math.round(window.scrollY || 0),
+                          jsv: JSV, dpr: window.devicePixelRatio || 1})})
+    .catch(() => {});
+}
+// A webview pane can change the canvas's CSS box without any resize event, so a
+// press also publishes. Registered ONCE per target; the old page registered the
+// visualViewport listener twice.
+cv.addEventListener('pointerdown', publishBox, {passive:true});
+addEventListener('resize', publishBox);
+if(window.visualViewport) visualViewport.addEventListener('resize', publishBox);
+addEventListener('scroll', publishBox, {passive:true});
+// A tab closing right after a lift would drop that stroke: keepalive lets the
+// request outlive the page.
+addEventListener('pagehide', function(){
+  if(!queue.length) return;
+  const batch = queue; queue = [];
+  try{ send(batch).catch(() => {}); }catch(e){}
+});
+
+publishBox();
+grid();
+</script>

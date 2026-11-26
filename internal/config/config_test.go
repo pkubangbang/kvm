@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -10,6 +11,21 @@ func TestDefaults(t *testing.T) {
 	c := Defaults()
 	if c.Baud != 115200 || c.ScreenW != 1920 || c.ScreenH != 1080 || c.StepPx != 4 {
 		t.Fatalf("unexpected defaults: %+v", c)
+	}
+}
+
+// TestDefaultsPortMatchesPlatform pins the one default that is genuinely
+// platform-shaped. A wrong value here does not fail loudly at parse time — it
+// opens the wrong device, so an untouched port would make the tool look broken on
+// a machine where the chip is fine.
+func TestDefaultsPortMatchesPlatform(t *testing.T) {
+	c := Defaults()
+	want := "/dev/ttyACM0"
+	if runtime.GOOS == "windows" {
+		want = "COM3"
+	}
+	if c.Port != want {
+		t.Fatalf("Defaults().Port = %q on %s; want %q", c.Port, runtime.GOOS, want)
 	}
 }
 

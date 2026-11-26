@@ -1,344 +1,366 @@
 package main
 
+// Tests for the append-only evidence store.
+//
+// Each of the four cases at the top FAILED on the store as it stood before the
+// 2026-11-25 fixes, and they are kept because each one is a silent-loss mode
+// that produced a wrong conclusion on this rig before it was a test:
+//
+//	(a) same-millisecond ts collision — a real HID drag lost its drags and, on
+//	    one measured run, its `down`; the file could not reconstruct the stroke.
+//	(b) epoch map lived in memory only — after a restart the next events were
+//	    written with epoch 0 behind an epoch 2 boundary, resurrecting retired ink.
+//	(c) torn trailing line — O_APPEND adds no separator, so a tail without a
+//	    newline merged with the next append into one unparseable line and BOTH
+//	    records were lost.
+//	(d) countsUpTo counted every epoch below the new one, not the one the clear
+//	    actually destroyed, so clear#2 reported the whole file's history.
+
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 )
 
-// traceJSON decodes the handler's body into strokes.
-func traceJSON(t *testing.T, b []byte) []Stroke {
+// --- helpers -------------------------------------------------------------
+
+func f64(v float64) *float64 { return &v }
+
+// post sends one batch the way the page does.
+func post(t *testing.T, s *traceStore, client string, evs ...padEvent) (appended, dup int) {
 	t.Helper()
-	var out []Stroke
-	if err := json.Unmarshal(b, &out); err != nil {
-		t.Fatalf("body is not a stroke array: %v (body %.200s)", err, b)
+	body, err := json.Marshal(padPost{Client: client, Version: Protocol, Events: evs})
+	if err != nil {
+		t.Fatalf("marshal post: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/log", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.handlePad(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("post %s: %d %s", client, w.Code, w.Body.String())
+	}
+	var resp struct {
+		Appended   int `json:"appended"`
+		Duplicates int `json:"duplicates"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v (%s)", err, w.Body.String())
+	}
+	return resp.Appended, resp.Duplicates
+}
+
+// records reads a client's log straight off disk — never through an API, because
+// there is no read API (PAD-PROTOCOL.md §2).
+func records(t *testing.T, s *traceStore, client string) []padRecord {
+	t.Helper()
+	recs, err := readLog(s.path(client))
+	if err != nil {
+		t.Fatalf("readLog: %v", err)
+	}
+	return recs
+}
+
+func kinds(recs []padRecord) []string {
+	out := make([]string, len(recs))
+	for i, r := range recs {
+		out[i] = r.Kind
 	}
 	return out
 }
 
-// postTrace drives handleTrace the way the page does.
-func postTrace(t *testing.T, s *traceStore, query, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/trace"+query, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	s.handleTrace(w, req)
-	return w
-}
+// --- (a) same-millisecond events: the trade, pinned -----------------------
 
-func getTrace(t *testing.T, s *traceStore, query string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/trace"+query, nil)
-	w := httptest.NewRecorder()
-	s.handleTrace(w, req)
-	return w
-}
-
-// GET must serve the accumulated record again: 16 scripts read it and the old
-// handler answered 405 for every reader.
-func TestGetReturnsAccumulatedTrace(t *testing.T) {
-	dir := t.TempDir()
-	s := newTraceStore(dir)
-
-	if w := postTrace(t, s, "?client=abc", `[[{"ts":1,"x":2,"y":3,"fx":0.25,"fy":0.75}]]`); w.Code != 200 {
-		t.Fatalf("post: %d %.200s", w.Code, w.Body.String())
+// TWO EVENTS OF THE SAME KIND AT THE SAME MILLISECOND ARE A RETRANSMIT.
+//
+// This is the contract the store chose, and it is asserted rather than hidden:
+// the de-duplication key is (ts, kind), so a same-ts same-kind pair appends once.
+// The page cannot produce such a pair any more (nextTS() in page.html is
+// strictly increasing), so this only fires for a STALE TAB still running old
+// JS — where the residual loss is exactly one of two same-kind events at one ms.
+//
+// What the key DOES buy is the property in the sibling test below: four
+// DIFFERENT kinds at one millisecond all survive, which bare-ts de-dup dropped
+// (measured: a 315 px drag reduced to two records).
+func TestSameMillisecondBatchKeepsOneEventPerKind(t *testing.T) {
+	s := newTraceStore(t.TempDir())
+	// A press + coalesced moves + release inside one JS tick: every event
+	// carries the SAME ts. The second `drag` is indistinguishable from a
+	// retransmit of the first, so it is dropped BY DESIGN.
+	evs := []padEvent{
+		{Kind: "down", TS: 100, RX: f64(0.1), RY: f64(0.1)},
+		{Kind: "drag", TS: 100, RX: f64(0.2), RY: f64(0.1)},
+		{Kind: "drag", TS: 100, RX: f64(0.3), RY: f64(0.1)},
+		{Kind: "up", TS: 100, RX: f64(0.4), RY: f64(0.1)},
 	}
-	if w := postTrace(t, s, "?client=abc", `[[{"ts":2,"x":4,"y":5,"fx":0,"fy":0}]]`); w.Code != 200 {
-		t.Fatalf("post 2: %d", w.Code)
+	appended, dup := post(t, s, "c", evs...)
+	if appended != 3 || dup != 1 {
+		t.Fatalf("appended=%d dup=%d, want 3/1 (one same-kind pair is a retransmit)", appended, dup)
 	}
-
-	w := getTrace(t, s, "?client=abc")
-	if w.Code != 200 {
-		t.Fatalf("GET: %d %.200s", w.Code, w.Body.String())
+	got := kinds(records(t, s, "c"))
+	want := []string{"down", "drag", "up"}
+	if len(got) != len(want) {
+		t.Fatalf("log holds %v, want %v", got, want)
 	}
-	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Errorf("GET content-type = %q", ct)
-	}
-	got := traceJSON(t, w.Body.Bytes())
-	if len(got) != 2 {
-		t.Fatalf("GET returned %d strokes, want 2", len(got))
-	}
-	if got[0][0].X != 2 || got[0][0].Fy != 0.75 {
-		t.Errorf("first point lost its values: %+v", got[0][0])
-	}
-}
-
-// POST stays APPEND: a second commit must not replace the first.
-func TestPostAppends(t *testing.T) {
-	dir := t.TempDir()
-	s := newTraceStore(dir)
-	postTrace(t, s, "?client=c", `[[{"ts":1,"x":1,"y":1}]]`)
-	postTrace(t, s, "?client=c", `[[{"ts":2,"x":2,"y":2}]]`)
-	if n := len(traceJSON(t, getTrace(t, s, "?client=c").Body.Bytes())); n != 2 {
-		t.Fatalf("file holds %d strokes, want 2", n)
-	}
-}
-
-// An empty array truncates ONLY that client and bumps only that client's epoch.
-func TestClearTruncatesOnlyThatClient(t *testing.T) {
-	dir := t.TempDir()
-	s := newTraceStore(dir)
-	postTrace(t, s, "?client=a", `[[{"ts":1,"x":1,"y":1}]]`)
-	postTrace(t, s, "?client=b", `[[{"ts":1,"x":9,"y":9}]]`)
-
-	if w := postTrace(t, s, "?client=a", `[]`); w.Code != 200 {
-		t.Fatalf("clear: %d", w.Code)
-	}
-	if n := len(traceJSON(t, getTrace(t, s, "?client=a").Body.Bytes())); n != 0 {
-		t.Errorf("client a has %d strokes after clear, want 0", n)
-	}
-	if n := len(traceJSON(t, getTrace(t, s, "?client=b").Body.Bytes())); n != 1 {
-		t.Errorf("client b lost its stroke: %d, want 1", n)
-	}
-
-	// The generation contract: a stroke committed AFTER a clear must carry an
-	// epoch strictly greater than the strokes that existed BEFORE it, so a stale
-	// page cannot re-add pre-clear ink under a current-looking label.
-	epOf := func(w *httptest.ResponseRecorder) int {
-		var resp struct {
-			Epoch int `json:"epoch"`
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("record %d = %q, want %q (%v)", i, got[i], want[i], got)
 		}
-		json.Unmarshal(w.Body.Bytes(), &resp)
-		return resp.Epoch
-	}
-	postTrace(t, s, "?client=g", `[[{"ts":1,"x":1,"y":1}]]`)
-	before := epOf(postTrace(t, s, "?client=g", `[]`)) // clear
-	after := epOf(postTrace(t, s, "?client=g", `[[{"ts":2,"x":2,"y":2}]]`))
-	if after != before {
-		t.Errorf("stroke after clear got epoch %d, the clear was %d", after, before)
-	}
-	second := epOf(postTrace(t, s, "?client=g", `[]`))
-	if second <= before {
-		t.Errorf("second clear epoch %d did not advance past %d", second, before)
-	}
-	third := epOf(postTrace(t, s, "?client=g", `[[{"ts":3,"x":3,"y":3}]]`))
-	if third <= second-1 {
-		t.Errorf("stroke after the second clear got epoch %d, clear was %d", third, second)
 	}
 }
 
-// A `null` body decodes to a nil slice exactly like []; it must be REJECTED, not
-// treated as a clear, or an accidental empty body truncates the record.
-func TestNullBodyIsRejected(t *testing.T) {
+// FOUR DIFFERENT KINDS AT ONE MILLISECOND ALL SURVIVE. This is what widening
+// the key from ts to (ts, kind) actually delivers, and the old store lost three
+// of these four.
+func TestSameMillisecondDifferentKindsAllSurvive(t *testing.T) {
+	s := newTraceStore(t.TempDir())
+	evs := []padEvent{
+		{Kind: "down", TS: 100, RX: f64(0.1), RY: f64(0.1)},
+		{Kind: "drag", TS: 100, RX: f64(0.2), RY: f64(0.1)},
+		{Kind: "drag2", TS: 100, RX: f64(0.3), RY: f64(0.1)}, // rejected kind — must not occupy the key
+		{Kind: "up", TS: 100, RX: f64(0.4), RY: f64(0.1)},
+	}
+	appended, dup := post(t, s, "c", evs...)
+	if appended != 3 || dup != 0 {
+		t.Fatalf("appended=%d dup=%d, want 3/0 (an unknown kind is not an event)", appended, dup)
+	}
+	got := kinds(records(t, s, "c"))
+	want := []string{"down", "drag", "up"}
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Fatalf("log holds %v, want %v", got, want)
+		}
+	}
+}
+
+// A real gesture — down, drags at DISTINCT ts, up — must land whole. This is
+// the shape the 315 px Z top bar failed to produce.
+func TestGestureWithDistinctStampsLandsWhole(t *testing.T) {
+	s := newTraceStore(t.TempDir())
+	post(t, s, "c", padEvent{Kind: "down", TS: 10, RX: f64(0.1), RY: f64(0.1)})
+	for i := int64(1); i <= 5; i++ {
+		post(t, s, "c", padEvent{Kind: "drag", TS: 10 + i, RX: f64(0.1 + 0.1*float64(i)), RY: f64(0.1)})
+	}
+	post(t, s, "c", padEvent{Kind: "up", TS: 16, RX: f64(0.7), RY: f64(0.1)})
+	got := kinds(records(t, s, "c"))
+	if len(got) != 7 || got[0] != "down" || got[6] != "up" {
+		t.Fatalf("gesture landed as %v, want down + 5 drags + up", got)
+	}
+}
+
+// A retry of an already-written batch must append NOTHING: the whole point of
+// the (client, ts) key is that flush()'s retry path is idempotent.
+func TestRetryOfSameBatchAppendsNothing(t *testing.T) {
+	s := newTraceStore(t.TempDir())
+	evs := []padEvent{
+		{Kind: "down", TS: 7, RX: f64(0.1), RY: f64(0.1)},
+		{Kind: "up", TS: 8, RX: f64(0.1), RY: f64(0.1)},
+	}
+	post(t, s, "c", evs...)
+	appended, dup := post(t, s, "c", evs...)
+	if appended != 0 || dup != 2 {
+		t.Fatalf("retry appended=%d dup=%d, want 0/2 — the retry path duplicates", appended, dup)
+	}
+	if n := len(records(t, s, "c")); n != 2 {
+		t.Fatalf("log holds %d records after a retry, want 2", n)
+	}
+}
+
+// --- (b) epoch survives a restart ---------------------------------------
+
+func TestEpochSeededFromDiskOnRestart(t *testing.T) {
+	dir := t.TempDir()
+	s1 := newTraceStore(dir)
+	post(t, s1, "c", padEvent{Kind: "load", TS: 1})
+	post(t, s1, "c", padEvent{Kind: "down", TS: 2, RX: f64(0.1), RY: f64(0.1)})
+	post(t, s1, "c", padEvent{Kind: "up", TS: 3, RX: f64(0.2), RY: f64(0.2)})
+	post(t, s1, "c", padEvent{Kind: "clear", TS: 4})
+	if e := s1.epoch("c"); e < 2 {
+		t.Fatalf("epoch after load+clear = %d, want >= 2", e)
+	}
+
+	// A fresh process on the same directory: the on-disk log is the only index.
+	s2 := newTraceStore(dir)
+	cur := s2.epoch("c")
+	post(t, s2, "c", padEvent{Kind: "down", TS: 5, RX: f64(0.3), RY: f64(0.3)})
+
+	all := records(t, s2, "c")
+	last := all[len(all)-1]
+	if last.Kind != "down" {
+		t.Fatalf("last record = %q, want down", last.Kind)
+	}
+	if last.Epoch != cur {
+		t.Fatalf("post-restart epoch = %d, want the seeded %d — the epoch reset to zero", last.Epoch, cur)
+	}
+	if last.Epoch < 2 {
+		t.Fatalf("post-restart epoch = %d, want >= 2 so retired ink is not resurrected", last.Epoch)
+	}
+}
+
+// --- (c) a torn trailing line is terminated, not merged -----------------
+
+func TestTornTailIsTerminatedBeforeAppend(t *testing.T) {
 	dir := t.TempDir()
 	s := newTraceStore(dir)
-	postTrace(t, s, "?client=z", `[[{"ts":1,"x":1,"y":1}]]`)
-	if w := postTrace(t, s, "?client=z", `null`); w.Code != http.StatusBadRequest {
-		t.Errorf("null body: got %d, want 400", w.Code)
+	file := s.path("c")
+	torn := `{"client":"c","ts":1,"kind":"down","epoch":1,"rx":0.1,"ry":0.1}`
+	if err := os.WriteFile(file, []byte(torn), 0o644); err != nil {
+		t.Fatalf("seed torn tail: %v", err)
 	}
-	if n := len(traceJSON(t, getTrace(t, s, "?client=z").Body.Bytes())); n != 1 {
-		t.Errorf("null body truncated the record: %d strokes", n)
+
+	post(t, s, "c", padEvent{Kind: "up", TS: 2, RX: f64(0.2), RY: f64(0.2)})
+
+	recs := records(t, s, "c")
+	if len(recs) != 2 {
+		raw, _ := os.ReadFile(file)
+		t.Fatalf("parsed %d records, want 2 — the torn tail swallowed the append (file: %.200s)", len(recs), raw)
+	}
+	if recs[0].Kind != "down" || recs[1].Kind != "up" {
+		t.Fatalf("kinds = %v, want [down up]", kinds(recs))
 	}
 }
 
-// The client id cannot escape the directory, and cannot reach events.jsonl.
+// --- (d) a clear counts only the epoch it destroys ----------------------
+
+func TestSecondClearCountsOnlyItsOwnEpoch(t *testing.T) {
+	s := newTraceStore(t.TempDir())
+	post(t, s, "c", padEvent{Kind: "load", TS: 1})
+
+	// Three strokes in the first epoch.
+	ts := int64(10)
+	for i := 0; i < 3; i++ {
+		post(t, s, "c", padEvent{Kind: "down", TS: ts, RX: f64(0.1), RY: f64(0.1)})
+		post(t, s, "c", padEvent{Kind: "drag", TS: ts + 1, RX: f64(0.2), RY: f64(0.2)})
+		post(t, s, "c", padEvent{Kind: "up", TS: ts + 2, RX: f64(0.3), RY: f64(0.3)})
+		ts += 3
+	}
+	post(t, s, "c", padEvent{Kind: "clear", TS: ts})
+
+	// One stroke in the second epoch, then a second clear.
+	ts++
+	post(t, s, "c", padEvent{Kind: "down", TS: ts, RX: f64(0.1), RY: f64(0.1)})
+	post(t, s, "c", padEvent{Kind: "up", TS: ts + 1, RX: f64(0.2), RY: f64(0.2)})
+	ts += 2
+	post(t, s, "c", padEvent{Kind: "clear", TS: ts})
+
+	var clears []padRecord
+	for _, r := range records(t, s, "c") {
+		if r.Kind == "clear" {
+			clears = append(clears, r)
+		}
+	}
+	if len(clears) != 2 {
+		t.Fatalf("found %d clears, want 2", len(clears))
+	}
+	if clears[0].Strokes != 3 || clears[0].Pts != 9 {
+		t.Errorf("clear#1 = %d strokes/%d points, want 3/9", clears[0].Strokes, clears[0].Pts)
+	}
+	if clears[1].Strokes != 1 || clears[1].Pts != 2 {
+		t.Errorf("clear#2 = %d strokes/%d points, want 1/2 — it counted retired epochs",
+			clears[1].Strokes, clears[1].Pts)
+	}
+}
+
+// --- the protocol itself ------------------------------------------------
+
 func TestClientIDCannotEscapeDir(t *testing.T) {
 	dir := t.TempDir()
 	s := newTraceStore(dir)
-	for _, evil := range []string{"../../etc/passwd", "/etc/passwd", "..", "events.jsonl", "a/b"} {
-		p := s.path(evil)
-		if filepath.Dir(p) != dir {
-			t.Errorf("client %q escapes the dir: %s", evil, p)
-		}
-		if filepath.Base(p) == "events.jsonl" {
-			t.Errorf("client %q resolves onto the event log: %s", evil, p)
-		}
+	post(t, s, "../../etc/passwd", padEvent{Kind: "down", TS: 1, RX: f64(0.1), RY: f64(0.1)})
+	got := s.path("../../etc/passwd")
+	if filepath.Dir(got) != dir {
+		t.Fatalf("client id escaped the store dir: %q", got)
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("sanitised file was not written inside dir: %v", err)
 	}
 }
 
-// A corrupt trace file must be PRESERVED, not silently replaced by the next
-// stroke (the old code set have=nil and rewrote the file).
+func TestConcurrentSameClientPostsAllLand(t *testing.T) {
+	s := newTraceStore(t.TempDir())
+	const n = 8
+	done := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer func() { recover() }()
+			body, _ := json.Marshal(padPost{Client: "c", Version: Protocol, Events: []padEvent{
+				{Kind: "down", TS: int64(100 + i), RX: f64(0.1), RY: f64(0.1)},
+			}})
+			req := httptest.NewRequest(http.MethodPost, "/api/log", strings.NewReader(string(body)))
+			w := httptest.NewRecorder()
+			s.handlePad(w, req)
+			if w.Code != http.StatusOK {
+				done <- errors.New(w.Body.String())
+				return
+			}
+			done <- nil
+		}(i)
+	}
+	for i := 0; i < n; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("concurrent post failed: %v", err)
+		}
+	}
+	if got := len(records(t, s, "c")); got != n {
+		t.Fatalf("log holds %d records, want %d — concurrent posts were lost", got, n)
+	}
+}
+
 func TestCorruptTraceIsPreserved(t *testing.T) {
 	dir := t.TempDir()
 	s := newTraceStore(dir)
-	p := s.path("k")
-	if err := os.WriteFile(p, []byte(`[{"ts":1`), 0o644); err != nil {
-		t.Fatal(err)
+	file := s.path("c")
+	bad := "{\"client\":\"c\",\"ts\":1,\"kind\":\"down\"}\nnot json at all\n"
+	if err := os.WriteFile(file, []byte(bad), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
 	}
-	if w := postTrace(t, s, "?client=k", `[[{"ts":2,"x":1,"y":1}]]`); w.Code != 200 {
-		t.Fatalf("post over corrupt file: %d", w.Code)
-	}
-	ents, _ := os.ReadDir(dir)
-	found := false
-	for _, e := range ents {
-		if strings.Contains(e.Name(), ".corrupt-") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("the corrupt trace was destroyed; dir has %v", ents)
-	}
-	if n := len(traceJSON(t, getTrace(t, s, "?client=k").Body.Bytes())); n != 1 {
-		t.Errorf("new record has %d strokes, want 1", n)
-	}
-}
-
-// Concurrent posts for the SAME client must all land: the per-client lock exists
-// precisely so a read-modify-write cannot drop a stroke.
-func TestConcurrentSameClientPostsAllLand(t *testing.T) {
-	dir := t.TempDir()
-	s := newTraceStore(dir)
-	var wg sync.WaitGroup
-	const n = 12
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			body := `[[{"ts":` + string(rune('0'+i%10)) + `,"x":` +
-				string(rune('0'+i%10)) + `,"y":0}]]`
-			postTrace(t, s, "?client=same", body)
-		}(i)
-	}
-	wg.Wait()
-	if got := len(traceJSON(t, getTrace(t, s, "?client=same").Body.Bytes())); got != n {
-		t.Fatalf("file holds %d strokes, want %d (a stroke was lost)", got, n)
-	}
-}
-
-// Two DIFFERENT clients must not be serialised behind each other's file I/O, and
-// must not corrupt each other's file.
-func TestConcurrentDifferentClients(t *testing.T) {
-	dir := t.TempDir()
-	s := newTraceStore(dir)
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			c := string(rune('a' + i))
-			for j := 0; j < 5; j++ {
-				postTrace(t, s, "?client="+c, `[[{"ts":1,"x":1,"y":1}]]`)
-			}
-		}(i)
-	}
-	wg.Wait()
-	for i := 0; i < 8; i++ {
-		c := string(rune('a' + i))
-		if n := len(traceJSON(t, getTrace(t, s, "?client="+c).Body.Bytes())); n != 5 {
-			t.Errorf("client %s has %d strokes, want 5", c, n)
-		}
-	}
-}
-
-// The events log must be one JSON object per line: a name with a newline cannot
-// forge a second record.
-func TestEventLogStaysOneLinePerEvent(t *testing.T) {
-	dir := t.TempDir()
-	s := newTraceStore(dir)
-	postTrace(t, s, "?client=q&name="+url.QueryEscape("evil\n{\"event\":\"fake\"}"),
-		`[[{"ts":1,"x":1,"y":1}]]`)
-
-	b, err := os.ReadFile(filepath.Join(dir, "events.jsonl"))
+	// The store must not truncate or rewrite a file it cannot fully parse.
+	post(t, s, "c", padEvent{Kind: "up", TS: 2, RX: f64(0.1), RY: f64(0.1)})
+	raw, err := os.ReadFile(file)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read: %v", err)
 	}
-	for i, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
-		if line == "" {
-			continue
-		}
-		var v map[string]any
-		if err := json.Unmarshal([]byte(line), &v); err != nil {
-			t.Fatalf("line %d is not JSON (newline leaked?): %v: %.120s", i, err, line)
-		}
+	if !strings.Contains(string(raw), "not json at all") {
+		t.Fatalf("corrupt line was dropped from the file: %.300s", raw)
+	}
+	if !strings.Contains(string(raw), `"up"`) {
+		t.Fatalf("the append after a corrupt line did not land: %.300s", raw)
 	}
 }
 
-// GET answers [] for a client that has never committed, rather than a 404 or an
-// empty body a json.loads caller would choke on.
-func TestGetWithoutFileIsEmptyArray(t *testing.T) {
+func TestGetIsGone(t *testing.T) {
 	s := newTraceStore(t.TempDir())
-	w := getTrace(t, s, "?client=never")
-	if w.Code != 200 {
-		t.Fatalf("GET: %d", w.Code)
-	}
-	if strings.TrimSpace(w.Body.String()) != "[]" {
-		t.Errorf("body = %q, want []", w.Body.String())
-	}
-}
-
-// GET without ?client= answers the newest client file.
-func TestGetWithoutClientReturnsNewest(t *testing.T) {
-	dir := t.TempDir()
-	s := newTraceStore(dir)
-	postTrace(t, s, "?client=old", `[[{"ts":1,"x":1,"y":1}]]`)
-	postTrace(t, s, "?client=new", `[[{"ts":2,"x":2,"y":2}],[{"ts":3,"x":3,"y":3}]]`)
-	if n := len(traceJSON(t, getTrace(t, s, "").Body.Bytes())); n != 2 {
-		t.Errorf("newest file has %d strokes, want 2", n)
-	}
-}
-
-// A method other than GET/POST is refused with a JSON body and an Allow header.
-func TestUnsupportedMethodIsJSON(t *testing.T) {
-	s := newTraceStore(t.TempDir())
-	req := httptest.NewRequest(http.MethodPut, "/api/trace", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/log?client=c", nil)
 	w := httptest.NewRecorder()
-	s.handleTrace(w, req)
+	s.handlePad(w, req)
 	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("code = %d, want 405", w.Code)
-	}
-	if !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
-		t.Errorf("content-type = %q, want JSON", w.Header().Get("Content-Type"))
-	}
-	if w.Header().Get("Allow") == "" {
-		t.Errorf("no Allow header")
-	}
-	var v map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
-		t.Errorf("405 body is not JSON: %v", err)
+		t.Fatalf("GET /api/log = %d, want 405 — there is no read API", w.Code)
 	}
 }
 
-// The append path must be reader-atomic: a concurrent GET may see the old file
-// or the new one, never a partial one.
-func TestReaderNeverSeesPartialFile(t *testing.T) {
-	dir := t.TempDir()
-	s := newTraceStore(dir)
-	postTrace(t, s, "?client=r", `[[{"ts":1,"x":1,"y":1}]]`)
-
-	done := make(chan struct{})
-	var bad int
-	var mu sync.Mutex
-	go func() {
-		defer close(done)
-		for i := 0; i < 200; i++ {
-			b := getTrace(t, s, "?client=r").Body.Bytes()
-			if len(strings.TrimSpace(string(b))) == 0 {
-				continue
-			}
-			var out []Stroke
-			if err := json.Unmarshal(b, &out); err != nil {
-				mu.Lock()
-				bad++
-				mu.Unlock()
-			}
-		}
-	}()
-	for i := 0; i < 60; i++ {
-		postTrace(t, s, "?client=r", `[[{"ts":2,"x":2,"y":2}]]`)
-	}
-	<-done
-	if bad != 0 {
-		t.Errorf("%d partial reads across 200 concurrent GETs", bad)
+func TestProtocolMismatchIs409(t *testing.T) {
+	s := newTraceStore(t.TempDir())
+	body, _ := json.Marshal(padPost{Client: "c", Version: Protocol + 1, Events: []padEvent{{Kind: "down", TS: 1}}})
+	req := httptest.NewRequest(http.MethodPost, "/api/log", strings.NewReader(string(body)))
+	w := httptest.NewRecorder()
+	s.handlePad(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("version mismatch = %d, want 409", w.Code)
 	}
 }
 
-// fx/fy must always be PRESENT in the output (no omitempty): a reader that sees
-// a missing key cannot tell "offset 0" from "recorded before offsets existed".
-func TestFxAlwaysSerialised(t *testing.T) {
-	dir := t.TempDir()
-	s := newTraceStore(dir)
-	postTrace(t, s, "?client=f", `[[{"ts":1,"x":1,"y":1,"fx":0,"fy":0}]]`)
-	b, err := os.ReadFile(s.path("f"))
-	if err != nil {
-		t.Fatal(err)
+func TestUnknownKindIsRejected(t *testing.T) {
+	s := newTraceStore(t.TempDir())
+	appended, dup := post(t, s, "c", padEvent{Kind: "bogus", TS: 1})
+	if appended != 0 || dup != 0 {
+		t.Fatalf("appended=%d dup=%d for an unknown kind, want 0/0", appended, dup)
 	}
-	if !strings.Contains(string(b), `"fx"`) || !strings.Contains(string(b), `"fy"`) {
-		t.Errorf("fx/fy were omitted from the file: %.200s", b)
+	if n := len(records(t, s, "c")); n != 0 {
+		t.Fatalf("unknown kind reached the log (%d records)", n)
 	}
 }

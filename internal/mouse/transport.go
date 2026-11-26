@@ -1,6 +1,7 @@
 package mouse
 
 import (
+	"fmt"
 	"time"
 
 	"ch9329"
@@ -74,16 +75,27 @@ func (r *Rel) writeReport(frame []byte, gap time.Duration) error {
 	if gap < reportGapFloor {
 		gap = reportGapFloor
 	}
-	// Wait for THIS report's ACK. ReadAvailable returns as soon as one complete
-	// reply is present, so on a healthy chip this is ~1-2 ms.
+	// Wait for THIS report's ACK, and JUDGE it.
+	//
+	// This used to be `_ = p.ReadAvailable(ackWaitMS)`: the reply was read and
+	// thrown away, so a rejected report (0xE4 DEF_CMD_ERR_SUM, 0xE5 PARA,
+	// 0xE6 EXEC) was indistinguishable from success. The emitter then reported
+	// "sent" for a frame the chip never executed — the bookkeeping-lying class
+	// the whole motion design forbids. A reply that cannot be parsed is still
+	// ACCEPTED (some firmware answers in a layout ParseReply does not know, and
+	// a silent chip is a documented condition here), but a reply that IS a
+	// well-formed echo carrying a non-zero status is returned as an error.
 	//
 	// The FLOOR is measured from the write, not added after the read: a chip
 	// that answers in 0.4 ms (or a fake one that answers instantly) would
 	// otherwise satisfy the ACK and still leave the next report 0.4 ms behind —
 	// the same burst. So: spend whatever is left of the floor after the ACK.
-	_ = p.ReadAvailable(ackWaitMS)
+	reply := p.ReadAvailable(ackWaitMS)
 	if elapsed := time.Since(start); elapsed < gap {
 		time.Sleep(gap - elapsed)
+	}
+	if r, ok := ch9329.ParseReply(reply); ok && !r.OK() {
+		return fmt.Errorf("chip rejected the report: %s (0x%02X)", ch9329.StatusText(r.Status), r.Status)
 	}
 	return nil
 }

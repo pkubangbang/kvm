@@ -20,6 +20,11 @@ type fakePort struct {
 	// is recorded but ReadAvailable returns nothing, which is the "silent chip"
 	// case that must still be paced.
 	ack bool
+	// nak makes each write produce a well-formed REJECTION (status 0xE4, the
+	// command echo carrying the error bit). A driver that discards the reply
+	// cannot tell this apart from success, which is the defect this field
+	// exists to pin: see TestRejectedReplyIsAnError.
+	nak bool
 }
 
 type fakeWrite struct {
@@ -30,6 +35,11 @@ type fakeWrite struct {
 // Complete single-byte-status ACK: 57 AB 00 85 01 00 88 (cmd echoed with 0x80).
 var fakeAck = []byte{0x57, 0xAB, 0x00, 0x85, 0x01, 0x00, 0x88}
 
+// Rejected report: same layout, but the command echo carries the ERROR bit
+// (0xC0|cmd instead of 0x80|cmd) and the status is 0xE4 = DEF_CMD_ERR_SUM.
+// 0x57+0xAB+0x00+0xC5+0x01+0xE4 = 0x3AC -> 0xAC.
+var fakeNak = []byte{0x57, 0xAB, 0x00, 0xC5, 0x01, 0xE4, 0xAC}
+
 func (f *fakePort) Write(b []byte) (int, error) {
 	cp := make([]byte, len(b))
 	copy(cp, b)
@@ -38,6 +48,9 @@ func (f *fakePort) Write(b []byte) (int, error) {
 }
 
 func (f *fakePort) ReadAvailable(timeoutMs int) []byte {
+	if f.nak {
+		return fakeNak
+	}
 	if !f.ack {
 		return nil
 	}

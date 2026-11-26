@@ -30,8 +30,6 @@ package mouse
 import (
 	"math"
 	"time"
-
-	"ch9329"
 )
 
 // HumanProfile is the shape of one hand's motion. Zero fields take the
@@ -51,11 +49,30 @@ type HumanProfile struct {
 }
 
 func (p HumanProfile) withDefaults() HumanProfile {
+	// STEP SIZE MUST LIE INSIDE THE HOST'S 1:1 BAND.
+	//
+	// These defaults were 2 and 6 px, and that is the lossy band on this host:
+	// the measured delivery table says 6 px -> 0.66x and 3 px -> ~0.01x, so a
+	// held report of 2-6 px is coalesced or dropped by the host before the
+	// pointer ever sees it. The visible result was a held drag that fell short
+	// (20 px requested -> 12 delivered) and then tripped the stall guard
+	// ("the pointer stopped advancing for 8 consecutive reports") because the
+	// pointer genuinely was not advancing: the reports were being swallowed.
+	//
+	// The band that arrives is roughly 12-60 px per report. Defaults are set at
+	// its centre, and HeldStepPx (20) bounds every split, so the step bounds
+	// and the subdivision law agree instead of fighting each other.
 	if p.StepMin <= 0 {
-		p.StepMin = 2
+		p.StepMin = 12
 	}
 	if p.StepMax <= 0 {
-		p.StepMax = 6
+		p.StepMax = 20
+	}
+	if p.StepMin < 12 {
+		p.StepMin = 12 // below this the host starts dropping reports
+	}
+	if p.StepMax < p.StepMin {
+		p.StepMax = p.StepMin
 	}
 	if p.GapSlow <= 0 {
 		p.GapSlow = 16 * time.Millisecond
@@ -74,9 +91,13 @@ func (p HumanProfile) withDefaults() HumanProfile {
 
 // Dot draws a pen-down dot: press, stay, release. A press released without a
 // dwell is not observable as its own stroke in the pad's trace.
+//
+// The press goes through pressNow, NOT downRaw: downRaw defers the frame to the
+// first moving report, and a dot by definition has none, so on a deferring host
+// the click vanished entirely. See pressNow.
 func (r *Rel) Dot(p HumanProfile, stay time.Duration) error {
 	p = p.withDefaults()
-	if err := r.downRaw(); err != nil {
+	if err := r.pressNow(); err != nil {
 		return err
 	}
 	// Keep the button down long enough for a sample to be taken, then release.
@@ -97,6 +118,17 @@ func (r *Rel) HumanStroke(path Path, p HumanProfile) error {
 	p = p.withDefaults()
 	if len(path) == 0 {
 		return nil
+	}
+	// A SINGLE-POINT path never moves, so the deferred press has nothing to
+	// ride: it must be written now or the stroke is a release-for-a-press-the-
+	// host-never-saw. Multi-point paths keep the deferral (downRaw), because
+	// their first moving report carries the button.
+	if len(path) == 1 {
+		if err := r.pressNow(); err != nil {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+		return r.upRaw()
 	}
 	if err := r.downRaw(); err != nil {
 		return err
@@ -156,7 +188,7 @@ func (r *Rel) humanSegment(a, b [2]int, p HumanProfile, phase *float64) error {
 			// Sub-pixel step: advance without a report but do not lose it.
 			continue
 		}
-		if err := r.streamAt(ch9329.BtnLeft, sx, sy, gap); err != nil {
+		if err := r.streamAt(r.btn, sx, sy, gap); err != nil {
 			return err
 		}
 	}

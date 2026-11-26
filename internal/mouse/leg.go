@@ -1,6 +1,7 @@
 package mouse
 
 import (
+	"math"
 	"time"
 )
 
@@ -30,7 +31,7 @@ const (
 	wireSettle = 300 * time.Millisecond
 	// dragGapMS is the pinned report pacing inside a held span. See strokePath:
 	// the host delivers a held-span report 1:1 at 2 ms and only ~0.65x at 12 ms.
-	dragGapMS = 2
+	dragGapMS = 12
 	// settlePasses bounds the post-stroke correction loop.
 	settlePasses = 4
 	// settleQuiet is how long the wire must hold one position before a
@@ -154,7 +155,15 @@ func (r *Rel) strokePath(path Path) error {
 	for i := 1; i < len(path); i++ {
 		dx, dy := path[i][0]-path[i-1][0], path[i][1]-path[i-1][1]
 		for _, st := range evenReports(dx, dy) {
-			if err := r.streamAt(btnLeft, st[0], st[1], gap); err != nil {
+			if err := r.streamAt(r.btn, st[0], st[1], gap); err != nil {
+				_ = r.upRaw()
+				return err
+			}
+			if err := r.stallGuard(); err != nil {
+				// The movement is CANCELLED, not paused: release the button
+				// and stop. Continuing would keep pressing with nothing
+				// moving, which on a drag turns the user's next click into
+				// more of this stroke.
 				_ = r.upRaw()
 				return err
 			}
@@ -196,23 +205,16 @@ func (r *Rel) drawStep(a, b [2]int) error {
 // landPasses rather than fighting the host, and reports the residual it could
 // not remove.
 func (r *Rel) landOn(target [2]int) error {
-	for pass := 0; pass < landPasses; pass++ {
-		here, ok := r.wire()
-		if !ok {
-			return nil
-		}
-		dx, dy := target[0]-here[0], target[1]-here[1]
-		if absOf(dx) <= landSlack && absOf(dy) <= landSlack {
-			return nil
-		}
-		if err := r.walkTo(0, target); err != nil && err != ErrNoMotion {
-			return err
-		}
-	}
-	here, ok := r.wire()
-	if ok {
-		tracef("landOn: gave up at %v for %v", here, target)
-	}
+	// NO POST-STROKE CORRECTION.
+	//
+	// This used to read the pointer back and re-walk it to the target, up to
+	// landPasses times. That compensation belonged to a world where the host
+	// applied acceleration and the delivered distance had to be pulled back.
+	// With the non-acceleration law honoured — bounded vector steps, ACK-paced,
+	// exact sum — a stroke already ends where its last report ended, so the
+	// correction could only ADD motion. That is the visible jump after a click
+	// that commanded no movement at all. Open loop, end to finish.
+	_ = target
 	return nil
 }
 
@@ -232,7 +234,11 @@ func (r *Rel) strokePathPaced(path Path, gaps []time.Duration) error {
 			gap = gaps[i-1]
 		}
 		for _, st := range evenReports(dx, dy) {
-			if err := r.streamAt(btnLeft, st[0], st[1], gap); err != nil {
+			if err := r.streamAt(r.btn, st[0], st[1], gap); err != nil {
+				_ = r.upRaw()
+				return err
+			}
+			if err := r.stallGuard(); err != nil {
 				_ = r.upRaw()
 				return err
 			}
@@ -241,86 +247,72 @@ func (r *Rel) strokePathPaced(path Path, gaps []time.Duration) error {
 	return r.upRaw()
 }
 
+// stallGuard is the STALL PREVENTION: one report has just been emitted, and
+// this asks whether the pointer actually advanced as a result. It returns
+// ErrStalled once the pointer has failed to advance across maxStallReports
+// CONSERVATIVE comparisons, and the caller CANCELS the movement (releasing the
+// button) rather than continuing to stream.
+//
+// THE CONTRACT, precisely, because an off-by-one here is the difference between
+// a guard and a nuisance: the first call only takes a BASELINE; each later call
+// compares against it. A frozen pointer therefore needs maxStallReports+1 calls
+// to be cancelled — one to learn where the pointer is, then maxStallReports
+// silent reports. A movement of fewer reports than that can never be cancelled,
+// which is correct: nothing short of maxStallReports+1 reports can prove a
+// stall, and cancelling on less would abort legitimate short strokes (measured:
+// a 60 px held drag emits only 3 reports).
+//
+// WHY THIS EXISTS SEPARATELY FROM loopTolerance. loopTolerance is a
+// per-placement acceptance window used by the closed-loop paths; it says
+// nothing about an OPEN-LOOP emitter, which has no idea whether its reports
+// are doing anything — it just counts down the bytes it owes. At a screen edge
+// the pointer physically cannot advance, so those reports are no-ops, and an
+// unbounded emitter would keep pressing at the edge for the whole remaining
+// displacement. The reference implementation on Linux aborts a movement once
+// the pointer fails to advance for N consecutive reports; this is that rule.
+//
+// It is deliberately NOT a per-report check against an absolute target: the
+// observer publishes at ~16 ms while reports leave every ~2 ms, so a report
+// emitted now may legitimately not be visible yet. maxStallReports covers that
+// lag with room to spare, and the counter RESETS on any advance — a slow but
+// real stream is never cancelled, only one that has genuinely stopped.
+func (r *Rel) stallGuard() error {
+	var x, y int
+	var ok bool
+	if r.witness != nil {
+		p, got := r.witness()
+		x, y, ok = p[0], p[1], got
+	} else {
+		x, y, ok = WirePoint(wireSettle)
+	}
+	if !ok {
+		// NO WITNESS IS NOT A STALL. A platform without a cursor feed (or a
+		// feed that is briefly dead) cannot prove nothing moved, and
+		// cancelling on absent evidence would abort every stroke on that
+		// platform. The byte budget and LetterBudget remain the bounds.
+		return nil
+	}
+	cur := [2]int{x, y}
+	if !r.stallSeen {
+		r.stallSeen = true
+		r.stallFrom = cur
+		return nil
+	}
+	if cur != r.stallFrom {
+		r.stallFrom = cur
+		r.stallSilent = 0
+		return nil
+	}
+	r.stallSilent++
+	if r.stallSilent >= maxStallReports {
+		return ErrStalled
+	}
+	return nil
+}
+
 // settleHeldWithin is settleHeldSlow bounded by an explicit remaining budget:
 // the caller owns the letter's wall clock, so the correction stops when the
 // budget is gone instead of spending a fixed number of passes.
-func (r *Rel) settleHeldWithin(target [2]int, left time.Duration) error {
-	deadline := time.Now().Add(left)
-	return r.settleHeldBounded(target, deadline)
-}
-
-// settleHeldSlow is settleHeld paced for handwriting: the correction reports
-// follow the slow drag pacing, so the tail of a stroke being landed is in
-// flight long enough for the page to sample it instead of collapsing to a
-// single point. It is bounded exactly like settleHeld.
-func (r *Rel) settleHeldSlow(target [2]int) error {
-	return r.settleHeldBounded(target, time.Time{})
-}
-
-// settleHeldSlow's body, with an optional deadline: a zero deadline means "no
-// wall-clock bound beyond the fixed pass count". The held span passes the
-// letter's remaining budget here, so a slow correction cannot spend the time
-// the stroke's own reporting is entitled to.
-func (r *Rel) settleHeldBounded(target [2]int, deadline time.Time) error {
-	// NO RE-PRESS. This correction used to call downRaw() on entry and
-	// upRaw() on exit, i.e. it pressed the button AGAIN for a span that was
-	// still in flight and whose own release had just been swallowed by
-	// streamAt's all-zero guard. On the wire that was the stray 捺: nine
-	// btn=1 reports drifting 8.5 cells past the glyph's end, with no btn=00
-	// frame anywhere between the last ink report and them (kvm-wire.log
-	// +3.639 .. +3.927). The correction is the tail of a held span: it must
-	// inherit the caller's button state and never change it. Its own release
-	// is the caller's (upRaw, or abs.StrokeHeldPaced's defer).
-	if r.down {
-		return nil
-	}
-	const tailGap = 20 * time.Millisecond
-	for pass := 0; pass <= settlePasses; pass++ {
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			return nil
-		}
-		here, ok := r.wireSettled()
-		if !ok {
-			return nil
-		}
-		dx, dy := target[0]-here[0], target[1]-here[1]
-		if absOf(dx) <= arriveSlack && absOf(dy) <= arriveSlack {
-			return nil
-		}
-		if scx, scy := scaleByGain(dx, dy); scx == 0 && scy == 0 {
-			return nil
-		}
-		for _, step := range evenReports(dx, dy) {
-			if err := r.streamAt(btnLeft, step[0], step[1], tailGap); err != nil {
-				return err
-			}
-		}
-	}
-	here, _ := r.wireSettled()
-	tracef("settleHeldSlow: gave up at %v for %v", here, target)
-	return nil
-}
-
-// settleHeld closes the loop on the far END of a drawn stroke, with the button
-// still held. It glides the pointer onto target in the same equal small reports
-// the stroke uses, so the correction is a continuation of the ink rather than a
-// jump, and it gives up after settlePasses rather than fighting the host.
-func (r *Rel) settleHeld(target [2]int) error {
-	// NO SETTLE ON THE HELD PATH ANY MORE. This correction ran with the button
-	// still pressed, so every pixel it moved to chase the target was INK. The
-	// host's span gain runs the pointer a few percent PAST each commanded
-	// report, so by the end of a stroke the pointer is ahead of the target, and
-	// this loop then walked it BACK along the finished stroke — a visible hook
-	// past the glyph's end (measured: a stem that should stop at y 90.7 painted
-	// to 95.2, and a bowl whose closing run was held flat at 95.0).
-	//
-	// The endpoint is corrected by the CALLER after the release, with the button
-	// up (see landOn), which cannot leave ink. A held correction would have to
-	// be planned from a position read ~16 ms stale, and the pointer is still
-	// moving through it, so it also cannot be trusted to land on the target.
-	return nil
-}
-
 // wireSettled returns the pointer position once the wire has stopped changing,
 // which is the only reading a correction may be planned from.
 func (r *Rel) wireSettled() ([2]int, bool) {
@@ -357,16 +349,41 @@ func (r *Rel) wireSettled() ([2]int, bool) {
 // reports — the reader is slower than the writer, so a tight stream of tiny
 // reports arrives coalesced. Fewer, larger reports sidestep the reader cadence
 // entirely instead of trying to outrun it.
+// REPORT-PER-VECTOR CAP. The chip's byte is 127 per axis, but a host does not
+// see axes — it sees a vector, and a (100,100) report moves the pointer 141 px
+// in one frame. Held motion is only 1:1 while the step stays small (measured on
+// this rig: 20 px -> 22, 40 px -> 60, i.e. 1.5x once the step grows), so the
+// split is bounded by the VECTOR length, not by max(|dx|,|dy|).
+//
+// The user's rule makes this concrete: never let the pointer jump during a
+// drag, and never leave the no-acceleration band. 20 px per report is inside
+// that band on both counts; with the 8 ms transport floor it also caps sustained
+// speed at ~2.5 kpx/s, which is the price of never being accelerated.
+const HeldStepPx = 20 // exported so the CLI dry-run sizes its estimate with the same constant the emitter uses
+
+// DefaultGap is the report pacing every emitter gets without being asked.
+//
+// Pacing is not an option here, it is the thing that makes the pointer land
+// where it was told. The host accelerates a held stream, and that measured
+// factor (~1.1x on an unheld report, more on a held one) is acceleration rather
+// than loss — so it is avoided by cadence, never compensated by dividing the
+// request. Removing the old -gap flag left this at zero, so held spans fell
+// back to a hard-coded 2 ms and delivered short. A default restores correct
+// pacing and takes the chance-to-forget-it away: there is no flag to leave out
+// and no way to run without a gap.
+const DefaultGap = 12 * time.Millisecond
+
 func evenReports(dx, dy int) [][2]int {
 	cmdX, cmdY := scaleByGain(dx, dy)
 	if cmdX == 0 && cmdY == 0 {
 		return nil
 	}
-	longest := absOf(cmdX)
-	if ay := absOf(cmdY); ay > longest {
-		longest = ay
-	}
-	n := (longest + reportMaxPx - 1) / reportMaxPx
+	// Split by the LENGTH OF THE VECTOR, so every emitted report is a step of
+	// at most heldStepPx pixels of actual travel in ANY direction. A diagonal is
+	// the case that matters: bounding by max(|dx|,|dy|) let (141,141) through as
+	// one report — 199 px of travel — while claiming to respect a 127 px limit.
+	dist := int(math.Sqrt(float64(cmdX)*float64(cmdX) + float64(cmdY)*float64(cmdY)))
+	n := (dist + HeldStepPx - 1) / HeldStepPx
 	if n < 1 {
 		n = 1
 	}
@@ -432,7 +449,7 @@ func (r *Rel) followPath(path Path) error {
 	if _, ok := r.wire(); !ok {
 		return ErrNoPosition
 	}
-	return r.walkPath(btnLeft, path)
+	return r.walkPath(r.btn, path)
 }
 
 // goAbs is the absolute path: the same walk, no button.
@@ -547,17 +564,10 @@ func (a *Abs) StrokeHeldFast(path Path) error {
 	if err := a.rel.strokePath(path); err != nil {
 		return err
 	}
-	// A stroke is planned from the wire position BEFORE the press and drawn
-	// open loop, so the host's span gain (measured 1.03-1.06) leaves the
-	// endpoint a few percent past the last corner — on a ~330 px Z that is tens
-	// of pixels. Correct it here, with the button still held: the error is
-	// measured, re-glided in equal small steps, and re-measured a few times, so
-	// the ink ends where it was asked to and the correction is too small to see.
-	if err := a.rel.settleHeld([2]int{path[len(path)-1][0], path[len(path)-1][1]}); err != nil {
-		return err
-	}
-	if mx, my, ok := ShellPoint(); ok {
-		a.dv.px, a.dv.py = mx, my
-	}
+	// NO SETTLE. The stroke used to be corrected here, with the button still
+	// held, because the host's span gain (measured 1.03-1.06) left the endpoint
+	// a few percent past the last corner. That gain is exactly what the
+	// non-acceleration law removed — bounded vector steps, ACK-paced, exact
+	// sum — so the correction can only add motion the caller never asked for.
 	return nil
 }

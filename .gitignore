@@ -18,3 +18,21 @@ __pycache__/
 # Editors / OS
 .DS_Store
 *.swp
+
+# mycc runtime state (per-project sessions, caches, transcripts).
+# Contents-only, not `/.mycc/`, so a future negation can track a specific
+# subfolder (e.g. `!.mycc/skills/`) without committing sessions.
+/.mycc/*
+
+# Runtime trace output from `kvm-inputpad -out strokes.d`
+/strokes.d/
+
+# node_modules/ holds no dependency tree here: node_modules/mycc is a JUNCTION to
+# the mycc tool repo (zero files; no package.json outside it). Left unignored,
+# `git add -A` warns "adding embedded git repository" and commits it as an
+# accidental submodule pointer.
+node_modules/
+
+# Temp files from in-place edits (e.g. `kvm-inputpad.exe~`)
+*~
+

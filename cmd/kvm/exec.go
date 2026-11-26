@@ -7,68 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"ch9329"
 	"github.com/pkubangbang/kvm/internal/cli"
-	"github.com/pkubangbang/kvm/internal/config"
 	"github.com/pkubangbang/kvm/internal/mouse"
 )
 
-// runMouse is the whole surface: predict or send one sequence.
-func runMouse(argv []string, dryRun, ease bool, stepFlag, gapFlag int, origin bool, portFlag string, baudFlag int) {
-	// -dry-run splits here, ONCE. runPlan is the whole predict path and never
-	// opens the device, so runFire carries no dry-run branch of its own.
-	if dryRun {
-		runPlan(argv, ease, stepFlag)
-		fmt.Println("dry-run: nothing sent")
-		return
-	}
-	runFire(argv, ease, stepFlag, gapFlag, origin, portFlag, baudFlag)
-}
-
-// runPlan validates the sequence and prints what it would send — including the
-func runPlan(argv []string, ease bool, stepFlag int) {
-	cfg := config.Load()
-	step := stepOf(cfg, stepFlag)
-	seq, err := cli.Parse(argv, cli.Config{ScreenW: cfg.ScreenW, ScreenH: cfg.ScreenH})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "kvm: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("plan: %s mode, %d verbs, step %d px, ease=%v\n", ns(seq.Rel), len(seq.Verbs), step, ease)
-	px, py := 0, 0
-	for i, v := range seq.Verbs {
-		switch v.Kind {
-		case cli.Move:
-			if seq.Rel {
-				frames := framesFor(v.A, v.B, step)
-				fmt.Printf("  %2d %-5s %+4d %+4d -> ~%d reports, ends %+d %+d\n",
-					i, v.Kind, v.A, v.B, frames, v.A, v.B)
-				px += v.A
-				py += v.B
-			} else {
-				fmt.Printf("  %2d %-5s %4d %4d -> instant jump\n", i, v.Kind, v.A, v.B)
-				px, py = v.A, v.B
-			}
-		case cli.Drag:
-			// Only the rel branch is reachable: absSpecs holds Move alone
-			// (cli/parse.go), so an abs `drag` is a parse error long before
-			// this switch. The old abs arm here printed "eased glide" for a
-			// verb the grammar cannot produce — removed rather than kept as
-			// a plausible-looking lie about -ease.
-			frames := framesFor(v.A, v.B, step)
-			fmt.Printf("  %2d %-5s %+4d %+4d -> ~%d reports, ends %+d %+d\n",
-				i, v.Kind, v.A, v.B, frames, px+v.A, py+v.B)
-			px += v.A
-			py += v.B
-		case cli.Wait:
-			// Printed because it is a real part of the pacing: a stroke's
-			// sample density is set by time in flight, so a plan that omits
-			// the waits is not the plan that will be sent.
-			fmt.Printf("  %2d %-5s %d ms\n", i, v.Kind, v.A)
-		case cli.Down, cli.Up:
-			fmt.Printf("  %2d %-5s button %s\n", i, v.Kind, strings.ToUpper(string(v.Kind)))
-		}
-	}
-	fmt.Printf("  ends at %+d %+d (relative to start)\n", px, py)
+// runMouse is the whole surface: send one sequence.
+func runMouse(argv []string, origin bool, portFlag string, baudFlag int) {
+	runFire(argv, origin, portFlag, baudFlag)
 }
 
 func splitOn(argv []string) [][]string {
@@ -90,9 +36,29 @@ func splitOn(argv []string) [][]string {
 	return out
 }
 
-func runFire(argv []string, ease bool, stepFlag, gapFlag int, origin bool, portFlag string, baudFlag int) {
+// fail releases the button BEFORE exiting, and is the only way out of a path
+// that may have a button held.
+//
+// os.Exit does not run deferred functions. This file defers dv.Release() and
+// dv.Close(), so every os.Exit inside the span loop bypassed the release and
+// left the chip holding the button DOWN on the wire — a physically latched
+// drag on a real HID device. The visible consequences were a desktop dragged
+// under the pointer, and every later run committing nothing because its press
+// was not a press: the button was already down from the previous failure.
+//
+// Release is called explicitly and its error is ignored on purpose: this is the
+// last thing the process does, and an error here cannot be reported usefully.
+func fail(dv *mouse.Device, code int, format string, args ...any) {
+	if dv != nil {
+		dv.Release()
+		dv.Close()
+	}
+	fmt.Fprintf(os.Stderr, format, args...)
+	os.Exit(code)
+}
+
+func runFire(argv []string, origin bool, portFlag string, baudFlag int) {
 	cfg := settings(portFlag, baudFlag)
-	step := stepOf(cfg, stepFlag)
 	segs := splitOn(argv)
 	for i := 1; i < len(segs) && len(argv) > 0; i++ {
 		if len(segs[i]) > 0 && segs[i][0] != "mouse" {
@@ -108,23 +74,17 @@ func runFire(argv []string, ease bool, stepFlag, gapFlag int, origin bool, portF
 
 	dv, err := open(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "kvm: %v\n", err)
-		os.Exit(3)
+		fail(dv, 3, "kvm: %v\n", err)
 	}
 	defer dv.Close()
 	defer dv.Release()
 
-	gap := cfg.GapMS
-	if gapFlag > 0 {
-		gap = gapFlag
-	}
-	if os.Getenv("KVM_GAP_MS") != "" {
-		if n, err := strconv.Atoi(os.Getenv("KVM_GAP_MS")); err == nil && n >= 0 {
-			gap = n
-		}
-	}
-	rel := mouse.NewRel(dv, step, time.Duration(gap)*time.Millisecond,
+	rel := mouse.NewRel(dv, mouse.HeldStepPx, mouse.DefaultGap,
 		time.Duration(cfg.ClickGap)*time.Millisecond)
+	if err := rel.SetButton(buttonMask()); err != nil {
+		fmt.Fprintf(os.Stderr, "kvm: %v\n", err)
+		os.Exit(2)
+	}
 	abs := mouse.NewAbs(dv, rel)
 
 	if origin && len(segs) == 1 && segs[0][1] == "rel" {
@@ -151,6 +111,12 @@ func runFire(argv []string, ease bool, stepFlag, gapFlag int, origin bool, portF
 		// No post-statement: the cursor is advanced deliberately at the bottom,
 		// and the held-run branch jumps it past the whole run. Using `for i++`
 		// and a `continue` there would double-advance and swallow the `up`.
+		//
+		// prevButton/rightSpan track a RIGHT span's button mask and restore it
+		// when the span ends. They must live at segment scope (not inside the
+		// verb case) so the `up`/`rup` arm can see what the `rdown` arm set.
+		var prevButton byte
+		rightSpan := false
 		for i := 0; i < len(seq.Verbs); {
 			v := seq.Verbs[i]
 			// While the button is held, a run of drag verbs is ONE stroke: a
@@ -162,7 +128,20 @@ func runFire(argv []string, ease bool, stepFlag, gapFlag int, origin bool, portF
 			// `move` is NOT part of this run: relSpecs[Move].state is stateUp,
 			// so a held `move` is a parse error and can never reach us. Testing
 			// for it here was the bug that used to swallow the terminating `up`.
-			if seq.Rel && rel.Held() && v.Kind == cli.Drag {
+			//
+			// THE GATE IS rel.Held(), NOT (rel.Held() && v.Kind == Drag). A
+			// single `drag` arrives as verbs[Down, Drag, Up]: `down` is
+			// dispatched below and sets rel.Held(), and the very next verb IS a
+			// drag, so the run is claimed from there. Requiring rel.Held() at the
+			// TOP of the loop instead looked equivalent and was not — it is only
+			// reached for verbs after the first, and it also silently turned any
+			// unclaimed held verb into "unhandled rel verb". Measured: with the
+			// old gate `mouse rel -human=false down drag 120 0 up` printed
+			//   kvm: segment 0 verb 1 (drag): unhandled rel verb "drag"
+			// as soon as the first drag was a leg of length 0 or the run was
+			// entered from the wrong index, and exited 3 while the pointer was
+			// still pressed.
+			if seq.Rel && v.Kind == cli.Drag {
 				path, gaps, end := heldRun(seq.Verbs, i)
 				// HUMAN MOTION. A held run of drags is drawn with the
 				// accelerate/cruise/decelerate profile (dwell at every corner,
@@ -195,29 +174,61 @@ func runFire(argv []string, ease bool, stepFlag, gapFlag int, origin bool, portF
 			}
 			switch {
 			case !seq.Rel:
-				if err := exec(abs, rel, seq.Rel, v, ease); err != nil {
+				if err := exec(abs, rel, seq.Rel, v); err != nil {
 					fmt.Fprintf(os.Stderr, "kvm: segment %d verb %d (%s): %v\n", s, i, v.Kind, err)
 					if rel.Held() {
 						rel.ForceRelease()
 					}
 					os.Exit(3)
 				}
-			case v.Kind == cli.Down:
-				if err := rel.Down(); err != nil {
-					fmt.Fprintf(os.Stderr, "kvm: segment %d verb %d (down): %v\n", s, i, err)
-					os.Exit(3)
+			case v.Kind == cli.Down, v.Kind == cli.RDown:
+				// The verb decides WHICH button is pressed; -button only sets the
+				// default that `down` carries. Switching here means one sequence can
+				// right-click without changing the mode of the whole command.
+				if v.Kind == cli.RDown {
+					// A right span must not leak the RIGHT button into a later
+					// `down`: the mask lives on the controller, so it is restored
+					// when the span ENDS — at its `up`/`rup`, or at the end of the
+					// loop if the span never closes.
+					//
+					// This used to be `defer rel.SetButton(prev)` HERE, which is a
+					// defer inside a loop: it fires when runFire RETURNS, not when
+					// the span ends. Every `rdown` therefore leaked BtnRight into
+					// every later verb, so
+					//   kvm mouse rel rdown rup down drag 40 0 up
+					// right-clicked and then RIGHT-dragged (a context menu instead
+					// of ink) while the comment claimed the opposite. The restore is
+					// now explicit state, applied where the span ends.
+					prevButton = rel.Button()
+					if err := rel.SetButton(ch9329.BtnRight); err != nil {
+						fail(dv, 3, "kvm: segment %d verb %d (rdown): %v\n", s, i, err)
+					}
+					rightSpan = true
 				}
-			case v.Kind == cli.Up:
+				if err := rel.Down(); err != nil {
+					fail(dv, 3, "kvm: segment %d verb %d (down): %v\n", s, i, err)
+				}
+			case v.Kind == cli.Up, v.Kind == cli.RUp:
+				// Restore the carried button as the span CLOSES, whatever verb
+				// closes it: an explicit `up`/`rup`, or the synthesized terminator
+				// Parse appends. Doing it here (rather than in a deferred call at
+				// function exit) is what keeps `rdown ... up` from colouring the
+				// rest of the command line right.
+				if rightSpan {
+					if err := rel.SetButton(prevButton); err != nil {
+						fmt.Fprintf(os.Stderr, "kvm: segment %d verb %d (restore button): %v\n", s, i, err)
+					} else {
+						rightSpan = false
+					}
+				}
 				// rel.Up() releases unconditionally, so an `up` after a span
 				// that already released (the normal case) is a harmless
 				// redundant release rather than a state change.
 				if err := rel.Up(); err != nil {
-					fmt.Fprintf(os.Stderr, "kvm: segment %d verb %d (up): %v\n", s, i, err)
-					rel.ForceRelease()
-					os.Exit(3)
+					fail(dv, 3, "kvm: segment %d verb %d (up): %v\n", s, i, err)
 				}
 			default:
-				if err := exec(abs, rel, seq.Rel, v, ease); err != nil {
+				if err := exec(abs, rel, seq.Rel, v); err != nil {
 					fmt.Fprintf(os.Stderr, "kvm: segment %d verb %d (%s): %v\n", s, i, v.Kind, err)
 					if rel.Held() {
 						rel.ForceRelease()
@@ -262,6 +273,26 @@ func runFire(argv []string, ease bool, stepFlag, gapFlag int, origin bool, portF
 // humanOn is the -human switch: true draws held runs with the human motion
 // profile, false keeps the flat equal-report emitter for A/B comparison.
 var humanOn = true
+
+// buttonOn is the -button switch: which button the held/inking reports carry.
+// Left is the default, so every existing invocation is byte-identical.
+var buttonOn = "left"
+
+// buttonMask maps buttonOn onto the HID button bits. An unknown name is an
+// error, not a silent left-click: a typo must not click the wrong thing.
+func buttonMask() byte {
+	switch strings.ToLower(buttonOn) {
+	case "", "left", "l", "1":
+		return ch9329.BtnLeft
+	case "right", "r", "2":
+		return ch9329.BtnRight
+	case "middle", "m", "3":
+		return ch9329.BtnMiddle
+	}
+	fmt.Fprintf(os.Stderr, "kvm: unknown -button %q (want left, right or middle)\n", buttonOn)
+	os.Exit(2)
+	return 0
+}
 
 func heldRun(verbs []cli.Verb, i int) (mouse.Path, []time.Duration, int) {
 	cx, cy := 0, 0
@@ -314,13 +345,16 @@ func runHeldSegment(argv []string, portFlag string, baudFlag int) {
 	cfg := settings(portFlag, baudFlag)
 	dv, err := open(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "kvm: %v\n", err)
-		os.Exit(3)
+		fail(dv, 3, "kvm: %v\n", err)
 	}
 	defer dv.Close()
 	defer dv.Release()
-	rel := mouse.NewRel(dv, stepOf(cfg, 0), time.Duration(cfg.GapMS)*time.Millisecond,
+	rel := mouse.NewRel(dv, mouse.HeldStepPx, mouse.DefaultGap,
 		time.Duration(cfg.ClickGap)*time.Millisecond)
+	if err := rel.SetButton(buttonMask()); err != nil {
+		fmt.Fprintf(os.Stderr, "kvm: %v\n", err)
+		os.Exit(2)
+	}
 	if err := rel.DrawStep([2]int{nums[0], nums[1]}, [2]int{nums[2], nums[3]}); err != nil {
 		fmt.Fprintf(os.Stderr, "kvm: holdseg: %v\n", err)
 		os.Exit(3)
@@ -347,20 +381,56 @@ func runHeldSegment(argv []string, portFlag string, baudFlag int) {
 // perpendicular drift that shows up as extra corners in the ink. It was
 // unreachable, so nothing regressed by removing it; keeping it was a trap for
 // whoever revived it.
-func exec(abs *mouse.Abs, rel *mouse.Rel, relative bool, v cli.Verb, ease bool) error {
+func exec(abs *mouse.Abs, rel *mouse.Rel, relative bool, v cli.Verb) error {
 	if !relative {
 		// absSpecs holds exactly one verb (Move): the namespace is
 		// placement-only, so anything else here is a grammar/executor
 		// disagreement, not a user error.
 		if v.Kind == cli.Move {
-			return abs.GoTo(v.A, v.B)
+			if err := abs.GoTo(v.A, v.B); err != nil {
+				return err
+			}
+			// REPORT WHAT LANDED, NOT WHAT WAS ASKED.
+			//
+			// Placement used to be a one-way write: the caller asked for a
+			// point, the report went out, and nothing said whether the pointer
+			// arrived. Everything downstream then assumed it had — and when a
+			// later step came up short, the shortfall was attributed to that
+			// later step while the real error was an unnoticed miss at the
+			// vertex.
+			//
+			// One read after the move closes that: absolute placement is not in
+			// flight, so the witness is honest here in a way it never is
+			// mid-stroke (the observer publishes at ~16 ms). A residual is
+			// printed whenever it is non-zero, and the requested point is always
+			// printed, so a caller can diff target against measured instead of
+			// trusting the request.
+			if mx, my, ok := mouse.ShellPoint(); ok {
+				fmt.Printf("abs move %d,%d -> %d,%d", v.A, v.B, mx, my)
+				if rx, ry := mx-v.A, my-v.B; rx != 0 || ry != 0 {
+					fmt.Printf("  residual %+d,%+d", rx, ry)
+				}
+				fmt.Println()
+			}
+			return nil
 		}
 		return fmt.Errorf("unhandled abs verb %q", v.Kind)
 	}
 
 	switch v.Kind {
 	case cli.Move:
-		return rel.Move(v.A, v.B)
+		if err := rel.Move(v.A, v.B); err != nil {
+			return err
+		}
+		// Report the measured position, same as the abs path. A relative move
+		// is the one place a caller most needs it: the delivered distance
+		// depends on report size and pacing, so "asked +20, moved +20" versus
+		// "asked +20, moved +15" is the difference between a working loop and
+		// a silent shortfall.
+		if mx, my, ok := mouse.ShellPoint(); ok {
+			fmt.Printf("rel move %+d,%+d -> %d,%d\n", v.A, v.B, mx, my)
+		}
+		return nil
 	case cli.Wait:
 		// Grammar-legal in both states (relSpecs[Wait].state == stateAny) but
 		// previously executor-illegal: it fell through to "unhandled verb", so
@@ -381,21 +451,6 @@ func ns(rel bool) string {
 		return "rel"
 	}
 	return "abs"
-}
-
-// framesFor is the dry-run's report estimate for one leg: the leg split into
-func framesFor(dx, dy, step int) int {
-	if step < 1 {
-		step = 1
-	}
-	n := (absOf(dx) + step - 1) / step
-	if m := (absOf(dy) + step - 1) / step; m > n {
-		n = m
-	}
-	if n < 1 {
-		n = 1
-	}
-	return n
 }
 
 func absOf(v int) int {

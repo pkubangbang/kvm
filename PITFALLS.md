@@ -471,3 +471,101 @@ pentagon, then a blue circle inscribed in it. What it took, and what tripped:
 - **Exclude the crosshair overlay from any red/blue mask.** The overlay lines are
   pure saturated red and span the whole screen; left in, they made the "pentagon
   bbox" the entire canvas and every tangency number meaningless.
+
+## 15. Win32 overlay: the black veil
+
+- **`ULW_ALPHA` on a zeroed overlay paints the desktop black, and no blend
+  function fixes it.** `ULW_ALPHA` multiplies the destination by each source
+  pixel's alpha; the transparent area of a full-screen overlay is alpha 0, so the
+  whole screen is multiplied to zero. Passing `AlphaFormat = 0` instead is not
+  honoured and the black stays. `ULW_COLORKEY` is the mode that works for "paint
+  only this shape" (`cmd/kvm-crosshair/windows_windows.go`, `present`).
+- **A pure-black overlay pixel is invisible, because black IS the colour key.**
+  With `ULW_COLORKEY` and `colourKey = 0x00000000`, every pixel equal to black is
+  punched out of the surface. Any drawing that intends to show black must use a
+  near-black, not `#000000` — the crosshair arms are red for exactly this reason
+  and never hit the key (`internal/crosshair/render.go`, `Draw`).
+- **The DIB is BGRA but `crosshair.Draw` takes RGBA.** Passing R, G, B straight
+  through renders the red arms blue. `win32Renderer.Draw` swaps the channels
+  before the call (`const red, green, blue, alpha = 255, 0, 0, 255` then
+  `premultiply(blue, green, red, alpha)`), so the same `Draw` produces the same
+  pixels on X11 and Win32.
+- **A layered window never receives `WM_PAINT`.** The class style must be zero:
+  `CS_OWNDC | CS_HREDRAW | CS_VREDRAW` makes `RegisterClassExW` fail with
+  `ERROR_INVALID_PARAMETER` on a layered window. The surface goes out through
+  `UpdateLayeredWindow`, whose `hdcSrc` must be a memory DC holding a 32-bpp
+  top-down DIB — a window DC fails with `ERROR_GEN_FAILURE`
+  (`cmd/kvm-crosshair/gdi_windows.go`).
+- **`GetModuleHandleW(0)` must be a real handle.** Registering the class and
+  creating the window against mismatched instances is the classic "Cannot find
+  window class"; both calls take the module handle from `moduleHandle()`
+  (`gdi_windows.go`).
+- **The `WNDPROC` callback must live at package scope.** `syscall.NewCallback`
+  allocates a trampoline Windows keeps for the class's lifetime; a local can be
+  collected and the message pump then dispatches into freed memory.
+
+## 16. Win32 overlay: "Not Responding"
+
+- **A window that never drains its thread queue is marked "Not Responding" by
+  Windows.** The first overlay bound `PeekMessageW` / `DispatchMessageW` but never
+  called them, so the queue filled, the process stopped answering `WM_NULL`, and
+  the OS greyed it out — while the layered surface it had already blitted stayed
+  on screen looking like a frozen black sheet (`cmd/kvm-crosshair/pump_windows.go`,
+  `windows_windows.go` `procPeekMessageW` block).
+- **`select` with a `default:` branch is not a message pump.** Draining with
+  `default:` never yields, so a burst of input events starves the loop.
+  `runDaemon` waits in `select` for the tick OR the quit, then pumps
+  (`main_windows.go`).
+- **`pump()` must return false on `WM_QUIT`.** `PeekMessageW` returns `WM_QUIT`
+  directly rather than filling the `MSG`, so the loop ends on the return value; a
+  render loop that ignores it spins on a dead window (`pump_windows.go`).
+
+## 17. Held state must derive from a frame actually written
+
+- **A `down` flag set before the write can be a lie; and a release that goes
+  through the "suppress zero-delta" path is never written at all.** A release
+  frame is exactly `btn=0 dx=0 dy=0`, which the all-zero guard in `streamAt`
+  swallows — so "release" returned `nil` having sent nothing, and the chip kept
+  the button DOWN while the controller believed it was up. The wire log shows it:
+  the last inking frame is followed by a re-press and nine `btn=1` reports
+  drifting 8.5 cells past the glyph's end (`internal/mouse/rel.go`, `release`).
+- **The fix is structural, not a flag flip.** `release()` writes the frame
+  directly and sets `r.down = false` only after a successful write; `Up`, `upRaw`,
+  `ForceRelease` and `strokeSeg` all route through it, and `Rel.Held()` is the one
+  source of truth the executor branches on (`cmd/kvm/exec.go` has no shadow
+  `buttonHeld`). `TestGoldenReleaseIsNeverSwallowed` pins it.
+- **Never `os.Exit` with the button down.** On any error path, release first; the
+  grammar always terminates a sequence with `up`, so arriving at the end still
+  pressed means grammar and executor disagree — `runFire` force-releases and says
+  so rather than leaving a stuck HID press that turns the user's next click into a
+  drag on their real desktop (`cmd/kvm/exec.go`).
+
+## 18. Windows input path: a press that rides no motion is not a press
+
+- **A zero-motion button frame reaches the pad as `pointermove` with
+  `buttons: 0`.** The page treats that as a lift, so the stroke is committed at
+  press time and every ink report after it is orphaned — measured as trace
+  entries of 1–3 points for multi-hundred-pixel legs
+  (`internal/mouse/press_windows.go`).
+- **The Windows fix is to defer the press onto the first MOVING report**
+  (`pressRidesFirstMove = true`), not to change the page. `press_other.go` keeps
+  Linux at `false` on purpose: the Linux motion path stays byte-identical, and the
+  two hosts genuinely differ here.
+
+## 19. inputpad cell mapping: one division per axis
+
+- **Dividing twice per axis is the classic off-by-a-scale bug.** An earlier
+  version converted client px → canvas px → cells, giving `x/6`: right only near
+  `x = 32`, where the two errors cancel, and drifting further right. The canvas is
+  already in cell units (`C` px per cell, width `N*C`), so the mapping as written
+  is a single division per axis, `(clientX - left) * N / r.width`
+  (`cmd/kvm-inputpad/main.go`, `pos`).
+- **`pos()` must be the only place that converts.** Everything the page records
+  and draws goes through it, so the trace is the path rather than the 6 px lattice
+  the pointer happened to cross; `fx`/`fy` carry the in-cell fraction so a
+  sub-cell reversal is visible at all (`addSample`, `px`).
+- **Lattice cells alone lose the turns.** Recording only integer cells quantises
+  every glide to cell crossings, so a reversal inside one cell reads as a dead
+  zone; the fractional offsets are what make the record renderable as the line
+  that was actually drawn.
+

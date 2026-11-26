@@ -15,7 +15,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/pkubangbang/kvm/internal/config"
@@ -26,19 +25,16 @@ func main() {
 	var (
 		portFlag   = flag.String("port", "", "serial port (default: discovered)")
 		baudFlag   = flag.Int("baud", 0, "baud rate (default: discovered)")
-		dryRun     = flag.Bool("dry-run", false, "print the frames, send nothing")
-		eased      = flag.Bool("ease", false, "ease travel: slow at both ends, fast in the middle")
 		humanFlag  = flag.Bool("human", true, "human motion profile (accelerate, dwell at corners, tremor)")
-		stepFlag   = flag.Int("step", 0, "max px per report (default: config/4)")
 		originFlag = flag.Bool("origin", false, "home to the top-left corner first (a known start)")
-		gapFlag    = flag.Int("gap", 0, "ms between reports (default: config; larger = slower, stays in the 1:1 plateau)")
+		buttonFlag = flag.String("button", "left", "button held by down/drag/holdseg: left, right or middle")
 	)
 	flag.Usage = usage
 	flag.Parse()
 
-	// Go's flag package stops at the first non-flag argument, so `kvm plan -ease
-	// mouse ...` would treat -ease as a command. Re-parse the tail ourselves so
-	// flags are accepted anywhere in the line.
+	// Go's flag package stops at the first non-flag argument, so `kvm mouse
+	// -gap 2 rel ...` would treat -gap as a command. Re-parse the tail ourselves
+	// so flags are accepted anywhere in the line.
 	args := flag.Args()
 	for {
 		rest := []string{}
@@ -46,9 +42,6 @@ func main() {
 		for i := 0; i < len(args); i++ {
 			a := args[i]
 			switch {
-			case a == "-ease" || a == "--ease":
-				*eased = true
-				consumed = true
 			case a == "-human" || a == "--human":
 				*humanFlag = true
 				consumed = true
@@ -59,20 +52,12 @@ func main() {
 			case a == "-origin" || a == "--origin":
 				*originFlag = true
 				consumed = true
-			case a == "-dry-run" || a == "--dry-run":
-				*dryRun = true
-				consumed = true
-			case (a == "-step" || a == "--step") && i+1 < len(args):
-				if n, err := strconv.Atoi(args[i+1]); err == nil {
-					*stepFlag = n
-				}
+			case (a == "-button" || a == "--button") && i+1 < len(args):
+				*buttonFlag = args[i+1]
 				i++
 				consumed = true
-			case (a == "-gap" || a == "--gap") && i+1 < len(args):
-				if n, err := strconv.Atoi(args[i+1]); err == nil {
-					*gapFlag = n
-				}
-				i++
+			case strings.HasPrefix(a, "-button=") || strings.HasPrefix(a, "--button="):
+				*buttonFlag = a[strings.Index(a, "=")+1:]
 				consumed = true
 			default:
 				rest = append(rest, a)
@@ -87,6 +72,16 @@ func main() {
 		usage()
 		os.Exit(1)
 	}
+
+	// THE GLOBAL FLAGS MUST BE APPLIED BEFORE ANY DISPATCH BRANCH.
+	//
+	// These used to be assigned further down, after the `holdseg` early return,
+	// so `-button right ... mouse abs holdseg ...` silently drew with the LEFT
+	// button — and `-button bogus` was never validated on that path, so a typo
+	// clicked rather than failing. Both are user-visible wrong-button defects.
+	// Assigning here means every branch below sees the flags the user typed.
+	humanOn = *humanFlag
+	buttonOn = *buttonFlag
 
 	switch args[0] {
 	case "mouse":
@@ -111,8 +106,7 @@ func main() {
 			runHeldSegment(args[3:], *portFlag, *baudFlag)
 			return
 		}
-		humanOn = *humanFlag
-		runMouse(args, *dryRun, *eased, *stepFlag, *gapFlag, *originFlag, *portFlag, *baudFlag)
+		runMouse(args, *originFlag, *portFlag, *baudFlag)
 		return
 	case "help", "-h", "--help":
 		usage()
@@ -127,17 +121,20 @@ func usage() {
 	fmt.Fprint(os.Stderr, `kvm — drive a CH9329 USB-HID bridge as a mouse
 
   kvm mouse abs move X Y          place the pointer
+  kvm -button L mouse abs holdseg X Y U V
+                                  one held segment (left|right|middle)
   kvm mouse rel move DX DY | down | up | drag DX DY | wait MS
+  kvm mouse rel rdown | rup       press/release the RIGHT button, same span rules
   kvm mouse pos                   where is the pointer
   kvm mouse hud on | off          the crosshair overlay
 
-  The verb set is closed: move, down, up, drag, wait (plus pos and hud).
+  The verb set is closed: move, down, up, rdown, rup, drag, wait (plus pos and hud).
+  A command line must end with its release (up, or rup for a right span).
 
-Flags:
-  -dry-run   predict the path, print the frames, send nothing
-  -ease      ease travel (slow at the ends, fast in the middle)
+Flags (anywhere on the line, before the verb list):
+  -button L|right|middle  which button down carries (rdown forces right)
   -origin    home to the top-left corner first, for a known start
-  -step N    max px per report (4 stays inside libinput's 1:1 plateau)
+  -human     human-motion profile for held spans (default on for ink)
 `)
 }
 
@@ -167,16 +164,6 @@ func open(cfg config.Config) (*mouse.Device, error) {
 	// an unknown position must stay unknown.
 	dv.ReadPos = mouse.ShellPoint
 	return dv, nil
-}
-
-func stepOf(cfg config.Config, flagStep int) int {
-	if flagStep > 0 {
-		return flagStep
-	}
-	if cfg.StepPx > 0 {
-		return cfg.StepPx
-	}
-	return 4
 }
 
 // runMousePos answers `kvm mouse pos`: where the pointer is.

@@ -1,6 +1,9 @@
 package mouse
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func maxOf(a, b int) int {
 	if a > b {
@@ -10,7 +13,7 @@ func maxOf(a, b int) int {
 }
 
 // The motion layer's one law: a requested distance is divided by the host's
-// measured gain and then sent as equal reports no longer than reportMaxPx,
+// measured gain and then sent as equal reports no longer than HeldStepPx of actual TRAVEL (vector length),
 // whose sum is exactly the scaled request — so the plain even move cannot drift.
 //
 // The gain is measured, not assumed: 60 -> 92, 100 -> 155, 160 -> 248 and
@@ -25,8 +28,8 @@ func TestEvenReportsPlateauAndExactSum(t *testing.T) {
 		reps := evenReports(c[0], c[1])
 		sx, sy := 0, 0
 		for _, r := range reps {
-			if absOf(r[0]) > reportMaxPx || absOf(r[1]) > reportMaxPx {
-				t.Fatalf("evenReports(%v) emitted %v beyond reportMaxPx %d", c, r, reportMaxPx)
+			if absOf(r[0]) > HeldStepPx || absOf(r[1]) > HeldStepPx {
+				t.Fatalf("evenReports(%v) emitted %v beyond HeldStepPx %d", c, r, HeldStepPx)
 			}
 			sx += r[0]
 			sy += r[1]
@@ -42,9 +45,9 @@ func TestEvenReportsPlateauAndExactSum(t *testing.T) {
 		if (c[0] != 0 || c[1] != 0) && len(reps) == 0 {
 			t.Fatalf("evenReports(%v) emitted nothing", c)
 		}
-		// Fewest reports that keep every one inside reportMaxPx.
-		longest := maxOf(absOf(wx), absOf(wy))
-		want := (longest + reportMaxPx - 1) / reportMaxPx
+		// Fewest reports that keep every one inside HeldStepPx (the vector cap that keeps motion out of the host acceleration curve).
+		longest := int(math.Sqrt(float64(wx)*float64(wx) + float64(wy)*float64(wy)))
+		want := (longest + HeldStepPx - 1) / HeldStepPx
 		if want < 1 && (wx != 0 || wy != 0) {
 			want = 1
 		}

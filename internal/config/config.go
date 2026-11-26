@@ -14,20 +14,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
 // Config holds the discovered equipment facts.
 type Config struct {
-	Version   int    `json:"version"`
-	Port      string `json:"port"`
-	PortAlt   string `json:"port_fallback,omitempty"`
-	Baud      int    `json:"baud"`
-	ScreenW   int    `json:"screen_w"`
-	ScreenH   int    `json:"screen_h"`
-	StepPx    int    `json:"step_px"`
-	GapMS     int    `json:"gap_ms"`
-	ClickGap  int    `json:"click_gap_ms"`
+	Version    int    `json:"version"`
+	Port       string `json:"port"`
+	PortAlt    string `json:"port_fallback,omitempty"`
+	Baud       int    `json:"baud"`
+	ScreenW    int    `json:"screen_w"`
+	ScreenH    int    `json:"screen_h"`
+	StepPx     int    `json:"step_px"`
+	ClickGap   int    `json:"click_gap_ms"`
 	VerifiedAt string `json:"verified_at,omitempty"`
 
 	// source records where each value came from, for `kvm config` output.
@@ -35,18 +35,37 @@ type Config struct {
 }
 
 // Defaults returns the values used when nothing has been discovered yet.
+//
+// The port is the one value that is genuinely platform-shaped rather than
+// discovered: the CH9329 enumerates as a USB CDC-ACM device, which on Linux is
+// /dev/ttyACM0 and on Windows is a COM port. Picking the right default here
+// means a first run finds the chip without the user passing -port; discovery
+// still overrides it when it finds something better.
 func Defaults() Config {
 	return Config{
 		Version:  1,
-		Port:     "/dev/ttyACM0",
+		Port:     defaultPort(),
 		Baud:     115200, // the only rate that answers on this unit
 		ScreenW:  1920,
 		ScreenH:  1080,
 		StepPx:   4, // inside libinput's 1:1 plateau
-		GapMS:    12,
 		ClickGap: 60,
 		Source:   map[string]string{},
 	}
+}
+
+// defaultPort names the device the chip normally enumerates as.
+//
+// Windows has no stable name for a serial device: COM3 is what this rig's CH343
+// board receives, but the number is assigned by enumeration order and can differ
+// on another machine. It is a starting point, not a promise — discovery and the
+// -port flag both outrank it, and a wrong default fails loudly at open time
+// rather than silently driving nothing.
+func defaultPort() string {
+	if runtime.GOOS == "windows" {
+		return "COM3"
+	}
+	return "/dev/ttyACM0"
 }
 
 // Path returns the config file location: beside the executable, so the values
@@ -96,9 +115,6 @@ func Load() Config {
 	}
 	if onDisk.StepPx > 0 {
 		cfg.StepPx = onDisk.StepPx
-	}
-	if onDisk.GapMS > 0 {
-		cfg.GapMS = onDisk.GapMS
 	}
 	if onDisk.ClickGap > 0 {
 		cfg.ClickGap = onDisk.ClickGap

@@ -40,6 +40,11 @@ const (
 	Up   Kind = "up"
 	Drag Kind = "drag"
 	Wait Kind = "wait"
+	// RDown and RUp are "down" and "up" with the RIGHT button. They exist as
+	// verbs, not as a flag, because a right-click is a first-class action
+	// ("open the context menu") and not a mode the whole command runs in.
+	RDown Kind = "rdown"
+	RUp   Kind = "rup"
 )
 
 // Verb is one parsed command in a sequence.
@@ -94,6 +99,14 @@ var relSpecs = map[Kind]spec{
 	Up:   {arity: 0, state: stateDown},
 	Drag: {arity: 2, state: stateDown},
 	Wait: {arity: 1, state: stateAny},
+	// The right button obeys the same latch: press only when up, release only
+	// when down. RDown and RUp are separate verbs rather than a button flag so
+	// one sequence can mix buttons without a mode switch.
+	RDown: {arity: 0, state: stateUp},
+	// RUp releases WHERE THE POINTER IS, so it is legal with either latch: a
+	// right-click in one process is `rdown` (which presses and releases where it
+	// started), and a two-process right-click is `rdown` then `rup`.
+	RUp: {arity: 0, state: stateAny},
 }
 
 func lookup(rel bool, k Kind) (spec, bool) {
@@ -223,7 +236,9 @@ func Parse(argv []string, cfg Config) (Sequence, error) {
 			// press is "press where the pointer already is" — coordinates are not
 			// part of the relative vocabulary at all, so no prior verb is needed.
 			down = true
-		case Up:
+		case RDown:
+			down = true
+		case Up, RUp:
 			down = false
 		}
 

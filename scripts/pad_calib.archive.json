@@ -1,9 +1,0 @@
-{
-  "px_per_cell": 6.024,
-  "px_per_cell_y": 5.955,
-  "left": 1067.5,
-  "top": 162.0,
-  "gain_x": 1.0,
-  "gain_y": 1.0,
-  "note": "Measured live through the pad's own trace file (draw a 2 px stroke at two known screen points, read the cell back): (1200,300)->(22.00,23.17), (1700,700)->(105.00,90.33) => 6.024/5.955 px per cell, origin (1067.5,162.0). This now matches the -box rect, because the canvas is pinned to 768x768 CSS px (it used to be viewport-sized, which is why an older calibration read 6.53/6.39). Re-measure whenever the window is resized; the probe is two strokes and a read of <dir>/<uuid>.json."
-}
